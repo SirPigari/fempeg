@@ -1,0 +1,23 @@
+[package]
+name = "fempeg"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5", features = ["derive"] }
+ctrlc = "3.5.1"
+image = "0.25.8"
+libloading = "0.8.9"
+num_cpus = "1.17.0"
+rayon = "1.11.0"
+rexif = "0.7.5"
+colored = "3.0"
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = "fat"
+codegen-units = 1
+strip = false
+panic = "abort"
