@@ -35,25 +35,25 @@ Basic usage examples:
 - Convert a single NEF to a PNG (default when no output provided):
 
 ```console
-fempeg photo.NEF
+fempeg ./photo.NEF
 ```
 
 - Convert a single NEF to a specific output path or filename:
 
 ```console
-fempeg photo.NEF -o /output/photo_out.png
+fempeg photo.NEF -o ./output/photo_out.png
 ```
 
 - Convert a directory of NEF files (writes outputs into an output directory):
 
 ```console
-fempeg /nefs -o /out --format png
+fempeg ./nefs -o ./out --format png
 ```
 
 - Convert to multiple formats at once (use `+` between formats):
 
 ```console
-fempeg photo.NEF -o /out -f png+jpeg
+fempeg photo.NEF -o ./out -f png+jpeg
 ```
 
 ##### Flags:

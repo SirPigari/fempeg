@@ -1,11 +1,14 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(target_os = "windows")]
+use anyhow::Context;
 use libloading::Library;
-use std::env;
-use std::fs;
+
+#[cfg(target_os = "windows")]
+use std::{env, fs};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use crate::term_colors::{blue, white};
+use crate::term_colors::{blue, white, green, pink};
 
 static LIB: OnceLock<Result<Library>> = OnceLock::new();
 
@@ -60,9 +63,10 @@ pub fn get_lib() -> Result<&'static Library> {
             #[cfg(target_os = "linux")]
             {
                 let head = blue("Failed to load system libraw:");
-                let hint = white(
-                    " Please install it using your package manager:\n  sudo apt install libraw-dev   # Ubuntu/Debian\n  sudo dnf install libraw       # Fedora\n  sudo pacman -S libraw         # Arch Linux",
-                );
+                let hint = white(format!(
+                    " Please install it using your package manager:\n  sudo {} install libraw-dev   {}\n  sudo {} install libraw       {}\n  sudo {} -S libraw         {} ",
+                    pink("apt"), green("# Ubuntu/Debian"), pink("dnf"), green("# Fedora"), pink("pacman"), green("# Arch Linux")
+                ));
                 anyhow::anyhow!(format!("{}{} {}", head, white(format!(" {}", e)), hint))
             }
 
