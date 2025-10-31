@@ -1,19 +1,21 @@
-use anyhow::Result;
 #[cfg(target_os = "windows")]
 use anyhow::Context;
+use anyhow::Result;
 use libloading::Library;
 
-#[cfg(target_os = "windows")]
-use std::{env, fs};
 use std::path::PathBuf;
 use std::sync::OnceLock;
+#[cfg(target_os = "windows")]
+use std::{env, fs};
 
-use crate::term_colors::{blue, white, green, pink};
+use crate::term_colors::{blue, white};
+#[cfg(target_os = "linux")]
+use crate::term_colors::{green, pink};
 
 static LIB: OnceLock<Result<Library>> = OnceLock::new();
 
 #[cfg(target_os = "windows")]
-const LIBRAW_DLL: &[u8] = include_bytes!("../assets/raw_r.dll");
+const LIBRAW_DLL: &[u8] = include_bytes!("../assets/libraw.dll");
 
 pub fn init_libraw() -> Result<PathBuf> {
     #[cfg(target_os = "windows")]
@@ -43,8 +45,15 @@ pub fn init_libraw() -> Result<PathBuf> {
 
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
-        eprintln!("Unsupported OS for libraw, defaulting to libraw.so");
-        Ok(PathBuf::from("libraw.so"))
+        let lib_path = std::env::var("LIBRAW_PATH").unwrap_or_else(|_| {
+            eprintln!(
+                "Unsupported OS for libraw, defaulting to libraw.so (env {} not set)",
+                blue("LIBRAW_PATH")
+            );
+            "libraw.so".to_string()
+        });
+
+        Ok(PathBuf::from(lib_path))
     }
 }
 

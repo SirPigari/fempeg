@@ -1,10 +1,11 @@
 use colored::Colorize;
 
-pub const BLUE:  (u8, u8, u8)   = (0x9d, 0xac, 0xff); // 9dacff
-pub const PINK:  (u8, u8, u8)   = (0xff, 0xd0, 0xd7); // ffd0d7
-pub const WHITE: (u8, u8, u8)   = (0xe4, 0xe4, 0xe4); // e4e4e4
-pub const DARK:  (u8, u8, u8)   = (0x08, 0x08, 0x08); // 080808
-pub const GREEN: (u8, u8, u8)   = (0x70, 0xe3, 0x2b); // 70e32b
+pub const BLUE: (u8, u8, u8) = (0x9d, 0xac, 0xff); // 9dacff
+pub const PINK: (u8, u8, u8) = (0xff, 0xd0, 0xd7); // ffd0d7
+pub const WHITE: (u8, u8, u8) = (0xe4, 0xe4, 0xe4); // e4e4e4
+pub const DARK: (u8, u8, u8) = (0x08, 0x08, 0x08); // 080808
+pub const GREEN: (u8, u8, u8) = (0x70, 0xe3, 0x2b); // 70e32b
+pub const RED: (u8, u8, u8) = (0xff, 0x5c, 0x57); // ff5c57
 
 pub fn blue(s: impl std::fmt::Display) -> colored::ColoredString {
     format!("{}", s).truecolor(BLUE.0, BLUE.1, BLUE.2)
@@ -24,4 +25,8 @@ pub fn dark(s: impl std::fmt::Display) -> colored::ColoredString {
 
 pub fn green(s: impl std::fmt::Display) -> colored::ColoredString {
     format!("{}", s).truecolor(GREEN.0, GREEN.1, GREEN.2)
+}
+
+pub fn red(s: impl std::fmt::Display) -> colored::ColoredString {
+    format!("{}", s).truecolor(RED.0, RED.1, RED.2)
 }

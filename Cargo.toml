@@ -14,6 +14,16 @@ rayon = "1.11.0"
 rexif = "0.7.5"
 colored = "3.0"
 
+include_dir = { version = "0.7.4", optional = true }
+serde_json = { version = "1.0.145", optional = true }
+ratatui = { version = "0.29", optional = true, features = ["crossterm"] }
+crossterm = { version = "0.29", optional = true }
+
+[features]
+default = []
+
+include_exiftool = ["serde_json", "include_dir", "ratatui", "crossterm"]
+
 [profile.release]
 opt-level = 3
 debug = false

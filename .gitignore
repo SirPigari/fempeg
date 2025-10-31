@@ -1,4 +1,6 @@
 /target
 /rawpy
 Cargo.lock
-/*.NEF
+*.NEF
+/examples/*
+!examples/*.NEF

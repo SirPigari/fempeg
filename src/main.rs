@@ -1,5 +1,6 @@
 use std::env;
 use std::fs::{self, File};
+use std::io::Read;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -10,7 +11,7 @@ use std::sync::{
 use std::thread;
 use std::time::Instant;
 
-use crate::term_colors::{blue, dark, pink, white};
+use crate::term_colors::{blue, dark, green, pink, red, white};
 use anyhow::{Context, Result};
 use clap::CommandFactory;
 use clap::Parser;
@@ -19,9 +20,30 @@ use num_cpus;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
+#[cfg(feature = "include_exiftool")]
+use crossterm::{
+    event::{self, Event as CEvent, KeyCode, KeyEvent, KeyModifiers},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode},
+};
+#[cfg(feature = "include_exiftool")]
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::Span,
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
+};
+#[cfg(feature = "include_exiftool")]
+use std::{collections::HashSet, io::stdout};
+
 mod init_libraw;
 mod libraw_ffi;
 mod term_colors;
+
+#[cfg(feature = "include_exiftool")]
+mod exiftool;
 
 const VALID_FORMATS: &[&str] = &["png", "jpeg", "jpg", "bmp", "gif", "webp"];
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -98,6 +120,13 @@ struct Args {
         help = "Enable debug output"
     )]
     debug: bool,
+    #[arg(
+        short = 'i',
+        long = "info",
+        default_value_t = false,
+        help = "Print metadata/info for the input file(s) and exit"
+    )]
+    info: bool,
     #[arg(short = 'v', long = "version", help = "Print version information")]
     version: bool,
     #[arg(
@@ -150,6 +179,365 @@ fn parse_brightness(opt: &Option<Option<String>>) -> BrightnessMode {
     }
 }
 
+#[cfg(not(feature = "include_exiftool"))]
+fn print_metadata(path: &Path) -> Result<()> {
+    let fname = path.to_string_lossy();
+    println!("{}", blue(format!("Metadata: {}", fname)));
+    let meta = std::fs::metadata(path).with_context(|| format!("Failed to stat {}", fname))?;
+    println!("  {}: {} bytes", white("Size"), meta.len());
+    let buf = std::fs::read(path).with_context(|| format!("Failed to read {}", fname))?;
+
+    match rexif::parse_buffer(&buf) {
+        Ok(exif) => {
+            if !exif.entries.is_empty() {
+                println!("\n{}", blue("EXIF / Metadata entries:"));
+                for entry in exif.entries.iter() {
+                    let tag_name = format!("{}", entry.tag);
+                    let value = format!("{}", entry.value);
+                    let max: usize = 512;
+                    let v = if value.len() > max {
+                        format!("{}...", &value[..max])
+                    } else {
+                        value
+                    };
+                    println!("  {}: {}", pink(tag_name), white(v));
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", pink(format!("Failed to parse EXIF/XMP: {}", e)));
+        }
+    }
+
+    if is_nef_file(path) {
+        println!("\n{}", blue("Format hint: NEF (Nikon RAW) detected"));
+    } else {
+        println!(
+            "\n{}",
+            blue("Format hint: NEF not detected by header heuristics")
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "include_exiftool")]
+fn print_metadata(path: &Path) -> Result<()> {
+    let json = exiftool::call_exiftool(path).context("exiftool failed")?;
+    let map = exiftool::parse_exiftool_json(&json).unwrap_or_default();
+
+    let mut entries: Vec<(String, String, String)> = Vec::new();
+    for (k, v) in map.into_iter() {
+        if let Some(pos) = k.find(':') {
+            let (prefix, rest) = k.split_at(pos);
+            let rest = &rest[1..];
+            entries.push((prefix.to_string(), rest.to_string(), v));
+        } else {
+            entries.push(("".to_string(), k, v));
+        }
+    }
+
+    entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    use std::collections::HashMap;
+    let mut prefix_colors: HashMap<String, Color> = HashMap::new();
+    let palette = [
+        Color::Rgb(0x9d, 0xac, 0xff),
+        Color::Rgb(0xff, 0xd0, 0xd7),
+        Color::Rgb(0xe4, 0xe4, 0xe4),
+        Color::Rgb(0x08, 0x08, 0x08),
+        Color::Green,
+        Color::Red,
+    ];
+    let mut pi = 0usize;
+    for (p, _, _) in &entries {
+        if !prefix_colors.contains_key(p) {
+            let c = palette[pi % palette.len()];
+            prefix_colors.insert(p.clone(), c);
+            pi = pi.wrapping_add(1);
+        }
+    }
+
+    enable_raw_mode().context("enable_raw_mode failed")?;
+    let mut stdout = stdout();
+    execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).context("Failed to create terminal")?;
+
+    let mut query = String::new();
+    let mut offset: usize = 0;
+    let mut last_key: Option<KeyCode> = None;
+    let mut last_key_time: Option<Instant> = None;
+
+    let res = (|| -> Result<()> {
+        loop {
+            terminal.draw(|f| {
+                let size = f.area();
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .margin(1)
+                    .constraints([Constraint::Min(3), Constraint::Length(3)])
+                    .split(size);
+
+                let q = query.to_ascii_lowercase();
+                let default_keys: Vec<&str> = vec![
+                    "IFD0:Model",
+                    "IFD0:Make",
+                    "ExifIFD:SerialNumber",
+                    "ExifIFD:LensModel",
+                    "ExifIFD:FocalLength",
+                    "ExifIFD:FNumber",
+                    "ExifIFD:ExposureTime",
+                    "Composite:ShutterSpeed",
+                    "Nikon:ISO",
+                    "ExifIFD:ExposureCompensation",
+                    "ExifIFD:ExposureMode",
+                    "ExifIFD:MeteringMode",
+                    "Nikon:FocusMode",
+                    "Composite:AutoFocus",
+                    "Nikon:AFAreaMode",
+                    "Nikon:WhiteBalance",
+                    "Nikon:PictureControlName",
+                    "Nikon:Contrast",
+                    "Nikon:Sharpness",
+                    "System:FileCreateDate",
+                    "Composite:ImageSize",
+                ];
+                let filtered: Vec<_> = if q.trim().is_empty() {
+                    if default_keys.is_empty() {
+                        entries.iter().collect()
+                    } else {
+                        let mut added: HashSet<usize> = HashSet::new();
+                        let mut out: Vec<&(String, String, String)> = Vec::new();
+
+                        let make_full = |p: &str, k: &str| {
+                            if p.is_empty() {
+                                k.to_string()
+                            } else {
+                                format!("{}:{}", p, k)
+                            }
+                        };
+
+                        for dk in &default_keys {
+                            let target = dk.to_ascii_lowercase();
+                            for (i, e) in entries.iter().enumerate() {
+                                if added.contains(&i) {
+                                    continue;
+                                }
+                                let full = make_full(&e.0, &e.1).to_ascii_lowercase();
+                                if full == target {
+                                    out.push(e);
+                                    added.insert(i);
+                                }
+                            }
+                        }
+
+                        let pri = ["nikon", "composite", "exifidf"];
+                        for &pfx in &pri {
+                            let mut bucket: Vec<(usize, &(String, String, String))> = entries
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, e)| {
+                                    !added.contains(i) && e.0.to_ascii_lowercase() == pfx
+                                })
+                                .collect();
+                            bucket.sort_by_key(|(_, e)| e.1.clone());
+                            for (i, e) in bucket {
+                                out.push(e);
+                                added.insert(i);
+                            }
+                        }
+
+                        let mut rest: Vec<(usize, &(String, String, String))> = entries
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| !added.contains(i))
+                            .collect();
+                        rest.sort_by_key(|(_, e)| (e.0.clone(), e.1.clone()));
+                        for (i, e) in rest {
+                            out.push(e);
+                            added.insert(i);
+                        }
+
+                        out
+                    }
+                } else {
+                    entries
+                        .iter()
+                        .filter(|(_, k, v)| {
+                            k.to_ascii_lowercase().contains(&q)
+                                || v.to_ascii_lowercase().contains(&q)
+                        })
+                        .collect()
+                };
+
+                let height = (chunks[0].height as usize).saturating_sub(2);
+                let start = offset.min(filtered.len());
+                let end = (start + height).min(filtered.len());
+
+                let rows: Vec<Row> = filtered[start..end]
+                    .iter()
+                    .map(|(p, k, v)| {
+                        let prefix = if p.is_empty() {
+                            "".to_string()
+                        } else {
+                            p.clone()
+                        };
+                        let fg = *prefix_colors.get(p).unwrap_or(&Color::Gray);
+                        let cell_prefix = Cell::from(Span::styled(
+                            prefix,
+                            Style::default().fg(fg).add_modifier(Modifier::BOLD),
+                        ));
+                        let cell_key = Cell::from(k.clone());
+                        let cell_val = Cell::from(v.clone());
+                        Row::new(vec![cell_prefix, cell_key, cell_val])
+                    })
+                    .collect();
+
+                let header = Row::new(vec!["Group", "Tag", "Value"])
+                    .style(Style::default().add_modifier(Modifier::BOLD));
+                let widths = [
+                    Constraint::Length(16),
+                    Constraint::Length(30),
+                    Constraint::Min(10),
+                ];
+                let table = Table::new(rows, widths)
+                    .header(header)
+                    .block(
+                        Block::default().borders(Borders::ALL).title(format!(
+                            "Metadata: {}",
+                            path.file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_else(|| path.to_string_lossy().to_string())
+                        )),
+                    )
+                    .column_spacing(1);
+
+                f.render_widget(table, chunks[0]);
+
+                let search = Paragraph::new(query.as_str())
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Search (type, Backspace, Del to clear, Esc/Ctrl-C to exit)"),
+                    )
+                    .wrap(Wrap { trim: true });
+                f.render_widget(search, chunks[1]);
+            })?;
+
+            if event::poll(std::time::Duration::from_millis(200))? {
+                match event::read()? {
+                    CEvent::Key(KeyEvent {
+                        code: KeyCode::Char('c'),
+                        modifiers: KeyModifiers::CONTROL,
+                        ..
+                    }) => {
+                        break;
+                    }
+                    CEvent::Key(KeyEvent {
+                        code: KeyCode::Esc, ..
+                    }) => {
+                        break;
+                    }
+                    CEvent::Key(KeyEvent {
+                        code: KeyCode::Char(ch),
+                        ..
+                    }) => {
+                        let now = Instant::now();
+                        let mut accept = true;
+                        if let Some(last) = &last_key {
+                            if *last == KeyCode::Char(ch) {
+                                if let Some(t) = last_key_time {
+                                    if now.duration_since(t).as_millis() < 40 {
+                                        accept = false;
+                                    }
+                                }
+                            }
+                        }
+                        if accept {
+                            query.push(ch);
+                            offset = 0;
+                            last_key = Some(KeyCode::Char(ch));
+                            last_key_time = Some(now);
+                        }
+                    }
+                    CEvent::Key(KeyEvent {
+                        code: KeyCode::Backspace,
+                        ..
+                    }) => {
+                        let now = Instant::now();
+                        let mut accept = true;
+                        if let Some(last) = &last_key {
+                            if *last == KeyCode::Backspace {
+                                if let Some(t) = last_key_time {
+                                    if now.duration_since(t).as_millis() < 40 {
+                                        accept = false;
+                                    }
+                                }
+                            }
+                        }
+                        if accept {
+                            query.pop();
+                            offset = 0;
+                            last_key = Some(KeyCode::Backspace);
+                            last_key_time = Some(now);
+                        }
+                    }
+                    CEvent::Key(KeyEvent {
+                        code: KeyCode::Delete,
+                        ..
+                    }) => {
+                        let now = Instant::now();
+                        let mut accept = true;
+                        if let Some(last) = &last_key {
+                            if *last == KeyCode::Delete {
+                                if let Some(t) = last_key_time {
+                                    if now.duration_since(t).as_millis() < 40 {
+                                        accept = false;
+                                    }
+                                }
+                            }
+                        }
+                        if accept {
+                            query.clear();
+                            offset = 0;
+                            last_key = Some(KeyCode::Delete);
+                            last_key_time = Some(now);
+                        }
+                    }
+                    CEvent::Key(KeyEvent {
+                        code: KeyCode::Up, ..
+                    }) => {
+                        offset = offset.saturating_sub(1);
+                    }
+                    CEvent::Key(KeyEvent {
+                        code: KeyCode::Down,
+                        ..
+                    }) => {
+                        offset = offset.saturating_add(1);
+                    }
+                    CEvent::Key(KeyEvent {
+                        code: KeyCode::Enter,
+                        ..
+                    }) => { /* todo */ }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    })();
+
+    disable_raw_mode().ok();
+    execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen
+    )
+    .ok();
+    terminal.show_cursor().ok();
+
+    res
+}
+
 fn apply_brightness(img: DynamicImage, mode: BrightnessMode) -> DynamicImage {
     match mode {
         BrightnessMode::None => img,
@@ -180,6 +568,41 @@ fn resize_image(img: DynamicImage, ratio: f64) -> DynamicImage {
     let new_w = (img.width() as f64 * scale).max(1.0) as u32;
     let new_h = (img.height() as f64 * scale).max(1.0) as u32;
     img.resize_exact(new_w, new_h, FilterType::Lanczos3)
+}
+
+fn is_nef_file(path: &Path) -> bool {
+    let f = std::fs::File::open(path);
+    let mut f = match f {
+        Ok(x) => x,
+        Err(_) => return false,
+    };
+    let mut buf = Vec::new();
+    let _ = std::io::Read::by_ref(&mut f)
+        .take(131072)
+        .read_to_end(&mut buf);
+    if buf.len() < 4 {
+        return false;
+    }
+    if !(buf.starts_with(b"II*\0") || buf.starts_with(b"MM\0*")) {
+        return false;
+    }
+    let mut found_nikon = false;
+    let lower: Vec<u8> = buf.iter().map(|b| b.to_ascii_lowercase()).collect();
+    if lower.windows(5).any(|w| w == b"nikon") {
+        found_nikon = true;
+    }
+    if found_nikon {
+        return true;
+    }
+    if let Ok(exif) = rexif::parse_buffer(&buf) {
+        for entry in exif.entries.iter() {
+            let val = format!("{}", entry.value).to_ascii_lowercase();
+            if val.contains("nikon") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn sort_inputs(inputs: &mut Vec<PathBuf>, method: &str, debug: bool) {
@@ -246,26 +669,30 @@ unsafe fn load_with_libraw(
 ) -> Result<DynamicImage> {
     let api = libraw_ffi::get_api().context("Failed to load libraw symbols")?;
     if debug {
-        println!("[load] calling libraw_init...");
+        println!("{} calling libraw_init...", blue("[init]"));
     }
     let raw = unsafe { (api.libraw_init)(0) };
     if debug {
-        println!("[load] libraw_init -> {:p}", raw);
+        println!("{} libraw_init -> {:p}", blue("[init]"), raw);
     }
     if raw.is_null() {
         anyhow::bail!("libraw_init returned null");
     }
 
     if debug {
-        println!("[load] reading file into memory...");
+        println!("{} reading file into memory...", blue("[read]"));
     }
     let data = std::fs::read(path).with_context(|| format!("Failed to read {:?}", path))?;
     if debug {
-        println!("[load] calling libraw_open_buffer (len={})...", data.len());
+        println!(
+            "{} calling libraw_open_buffer (len={})...",
+            blue("[buffer]"),
+            data.len()
+        );
     }
     let r = unsafe { (api.libraw_open_buffer)(raw, data.as_ptr(), data.len()) };
     if debug {
-        println!("[load] libraw_open_buffer -> {}", r);
+        println!("{} libraw_open_buffer -> {}", blue("[buffer]"), r);
     }
     if r != 0 {
         unsafe { (api.libraw_close)(raw) };
@@ -273,11 +700,11 @@ unsafe fn load_with_libraw(
     }
 
     if debug {
-        println!("[load] calling libraw_unpack...");
+        println!("{} calling libraw_unpack...", blue("[unpack]"));
     }
     let r = unsafe { (api.libraw_unpack)(raw) };
     if debug {
-        println!("[load] libraw_unpack -> {}", r);
+        println!("{} libraw_unpack -> {}", blue("[unpack]"), r);
     }
     if r != 0 {
         unsafe { (api.libraw_close)(raw) };
@@ -369,11 +796,11 @@ unsafe fn load_with_libraw(
     }
 
     if debug {
-        println!("[load] calling libraw_dcraw_process...");
+        println!("{} calling libraw_dcraw_process...", blue("[process]"));
     }
     let r = unsafe { (api.libraw_dcraw_process)(raw) };
     if debug {
-        println!("[load] libraw_dcraw_process -> {}", r);
+        println!("{} libraw_dcraw_process -> {}", blue("[process]"), r);
     }
     if r != 0 {
         unsafe { (api.libraw_close)(raw) };
@@ -381,7 +808,10 @@ unsafe fn load_with_libraw(
     }
 
     if debug {
-        println!("[load] calling libraw_dcraw_make_mem_image...");
+        println!(
+            "{} calling libraw_dcraw_make_mem_image...",
+            blue("[mem_image]")
+        );
     }
     let mut err_code: std::os::raw::c_int = 0;
     let pimg = unsafe {
@@ -389,8 +819,10 @@ unsafe fn load_with_libraw(
     };
     if debug {
         println!(
-            "[load] libraw_dcraw_make_mem_image -> {:p}, err={}",
-            pimg, err_code
+            "{} libraw_dcraw_make_mem_image -> {:p}, err={}",
+            blue("[mem_image]"),
+            pimg,
+            err_code
         );
     }
     if pimg.is_null() {
@@ -420,15 +852,19 @@ unsafe fn load_with_libraw(
         anyhow::bail!("libraw processed image has no data (size={})", data_size);
     }
     if debug {
-        println!("[load] constructing slice for data_size={}", data_size);
+        println!(
+            "{} constructing slice for data_size={}",
+            blue("[mem_image]"),
+            data_size
+        );
     }
     let slice = unsafe { std::slice::from_raw_parts(data_ptr, data_size) };
     if debug {
         if slice.len() > 0 {
             let b = slice[0];
-            println!("[load] first byte = {}", b);
+            println!("{} first byte = {}", blue("[mem_image]"), b);
         } else {
-            println!("[load] slice has no bytes");
+            println!("{} slice has no bytes", blue("[mem_image]"));
         }
     }
     let img = if ty == 1 {
@@ -565,6 +1001,17 @@ fn main() -> Result<()> {
     if raw_args.iter().any(|a| a == "--version" || a == "-v") {
         let prog_name = Args::command().get_name().to_string();
         println!("{} version {}", pink(prog_name), VERSION);
+        #[cfg(feature = "include_exiftool")]
+        {
+            match exiftool::get_exiftool_version() {
+                Ok(v) => println!("{} {}", blue("exiftool version:"), white(v)),
+                Err(e) => println!(
+                    "{} {}",
+                    blue("exiftool version:"),
+                    pink(format!("error retrieving version: {}", e))
+                ),
+            }
+        }
         return Ok(());
     }
 
@@ -577,7 +1024,15 @@ fn main() -> Result<()> {
         .collect();
     for f in &out_formats {
         if !VALID_FORMATS.contains(&f.as_str()) {
-            anyhow::bail!("Unsupported format: {}. Valid formats: {}", f, VALID_FORMATS.into_iter().map(|s| blue(s).to_string()).collect::<Vec<_>>().join(", "));
+            anyhow::bail!(
+                "Unsupported format: {}. Valid formats: {}",
+                f,
+                VALID_FORMATS
+                    .into_iter()
+                    .map(|s| blue(s).to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
     }
     if !(args.ratio > 0.0 && args.ratio <= 1.0) {
@@ -670,14 +1125,41 @@ fn main() -> Result<()> {
     }
 
     let total = inputs.len();
-    if total == 0 {
-        println!("{}", white("No .nef files found."));
+    if args.info {
+        if inputs.len() == 1 {
+            let p = &inputs[0];
+            if p.exists() && p.is_file() {
+                if let Err(e) = print_metadata(&p) {
+                    eprintln!(
+                        "{}",
+                        pink(format!("Error reading metadata for {}: {}", p.display(), e))
+                    );
+                }
+            } else {
+                eprintln!("{}", pink(format!("Not a file: {}", p.display())));
+            }
+            println!("");
+        } else {
+            eprintln!("Info flag takes only one file.")
+        }
         return Ok(());
+    }
+    if total == 0 {
+        println!("No {} files found.", pink(".NEF"));
+        return Ok(());
+    }
+
+    if cfg!(debug_assertions) && args.debug {
+        eprintln!(
+            "Running in {} mode, converting files will be {}",
+            blue("debug"),
+            red("slower")
+        );
     }
 
     if let Some(method) = args.sort.as_ref() {
         if args.debug {
-            eprintln!("Sorting {} inputs by method: {}", inputs.len(), method);
+            eprintln!("Sorting {} inputs by {} method", inputs.len(), blue(method));
         }
         sort_inputs(&mut inputs, method.as_str(), args.debug);
     }
@@ -704,7 +1186,9 @@ fn main() -> Result<()> {
                 let frame = frames[idx % frames.len()];
                 print!(
                     "\rConverting {} to {}... [{}]",
-                    spinner_in, out_desc_cl, frame
+                    pink(&spinner_in),
+                    blue(&out_desc_cl),
+                    frame
                 );
                 std::io::stdout().flush().ok();
                 idx = idx.wrapping_add(1);
@@ -715,6 +1199,15 @@ fn main() -> Result<()> {
         let t0 = Instant::now();
         let brightness_mode = parse_brightness(&args.brightness);
         let auto_bright = matches!(brightness_mode, BrightnessMode::Auto);
+        if !is_nef_file(&in_path) {
+            spinner_run.store(false, Ordering::SeqCst);
+            handle.join().ok();
+            return Err(anyhow::anyhow!(pink(format!(
+                "\n{}: {}",
+                red("Not a NEF format"),
+                in_path.display()
+            ))));
+        }
         let res = unsafe { load_with_libraw(&in_path, args.preview, args.debug, auto_bright) };
         match res {
             Ok(img) => {
@@ -777,7 +1270,12 @@ fn main() -> Result<()> {
                         handle.join().ok();
                         eprintln!(
                             "{}",
-                            pink(format!("\nError saving {}: {}", out_path.display(), e))
+                            pink(format!(
+                                "\n{} {}: {}",
+                                red("Error saving"),
+                                out_path.display(),
+                                e
+                            ))
                         );
                         return Err(e);
                     }
@@ -785,8 +1283,15 @@ fn main() -> Result<()> {
                 spinner_run.store(false, Ordering::SeqCst);
                 handle.join().ok();
                 let elapsed = t0.elapsed().as_secs_f64();
-                println!("\rDone conversion, output file(s): {}", out_desc);
-                println!("Total execution time: {}", format_time(elapsed as f64));
+                println!(
+                    "\rDone conversion, output file{}: {}",
+                    if outs.len() > 1 { "s" } else { "" },
+                    pink(out_desc)
+                );
+                println!(
+                    "Total execution time: {}",
+                    blue(format_time(elapsed as f64))
+                );
                 return Ok(());
             }
             Err(e) => {
@@ -794,7 +1299,12 @@ fn main() -> Result<()> {
                 handle.join().ok();
                 eprintln!(
                     "{}",
-                    pink(format!("\nError converting {}: {}", in_path.display(), e))
+                    pink(format!(
+                        "\n{} {}: {}",
+                        red("Error converting"),
+                        in_path.display(),
+                        e
+                    ))
                 );
                 return Err(e);
             }
@@ -852,6 +1362,12 @@ fn main() -> Result<()> {
 
             let t0 = Instant::now();
             let auto_bright = matches!(brightness_mode, BrightnessMode::Auto);
+            if !is_nef_file(&in_path) {
+                let fname = in_path.file_name().unwrap().to_string_lossy();
+                tx.send(format!("{}... {}", fname, pink("Skipped (not NEF)")))
+                    .ok();
+                return;
+            }
             let res = unsafe { load_with_libraw(&in_path, preview, debug, auto_bright) };
             match res {
                 Ok(img) => {
@@ -911,7 +1427,8 @@ fn main() -> Result<()> {
                         for (fmt, out_path) in out_formats.iter().zip(single_outs.iter()) {
                             if let Err(e) = save_image(&img, out_path, fmt) {
                                 let fname = in_path.file_name().unwrap().to_string_lossy();
-                                tx.send(format!("{}... Error saving: {}", fname, e)).ok();
+                                tx.send(format!("{}... {}: {}", fname, red("Error saving"), e))
+                                    .ok();
                                 return;
                             }
                         }
@@ -930,7 +1447,8 @@ fn main() -> Result<()> {
                                 );
                                 let out_path = parent.join(out_name);
                                 if let Err(e) = save_image(&img, &out_path, fmt) {
-                                    tx.send(format!("{}... Error saving: {}", fname, e)).ok();
+                                    tx.send(format!("{}... {}: {}", fname, red("Error saving"), e))
+                                        .ok();
                                     return;
                                 }
                             }
@@ -943,7 +1461,8 @@ fn main() -> Result<()> {
                                 );
                                 let out_path = out_dir.join(out_name);
                                 if let Err(e) = save_image(&img, &out_path, fmt) {
-                                    tx.send(format!("{}... Error saving: {}", fname, e)).ok();
+                                    tx.send(format!("{}... {}: {}", fname, red("Error saving"), e))
+                                        .ok();
                                     return;
                                 }
                             }
@@ -966,7 +1485,8 @@ fn main() -> Result<()> {
                 }
                 Err(e) => {
                     let name_for_msg = in_path.file_name().unwrap().to_string_lossy();
-                    tx.send(format!("{}... Error: {}", name_for_msg, e)).ok();
+                    tx.send(format!("{}... {}: {}", name_for_msg, red("Error"), e))
+                        .ok();
                 }
             }
         });
@@ -977,9 +1497,9 @@ fn main() -> Result<()> {
 
     let total_time = start.elapsed().as_secs_f64();
     if stop_flag.load(Ordering::SeqCst) {
-        println!("\nStopped early.");
+        println!("\n{}", red("Stopped early."));
     } else {
-        println!("\nAll conversions completed.");
+        println!("\n{}", green("All conversions completed."));
     }
     println!("Total execution time: {}", blue(format_time(total_time)));
 

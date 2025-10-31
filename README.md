@@ -2,82 +2,101 @@
   <img src="assets/fempeg-transparent.png" alt="Fempeg Logo" width="800"/>
 </p>
 
---- 
+---
 
-A simple program that converts [raw](https://en.wikipedia.org/wiki/Raw_image_format) [NEF](https://www.nikonusa.com/learn-and-explore/c/products-and-innovation/nikon-electronic-format-nef?srsltid=AfmBOorvso8GMKgt49omijROAXsl1z6R3ACuhRhtRF0reFP3p4tPBxat) files into processed image files, written in <a href="https://www.rust-lang.org/"><img src="https://upload.wikimedia.org/wikipedia/commons/0/0f/Original_Ferris.svg" alt="Rust" style="height:1em; vertical-align: text-bottom; position: relative;"/>Rust</a>.
+# Fempeg
+
+**Fempeg** is a Rust program that converts Nikon **NEF** RAW files into processed image formats like PNG or JPEG.
 
 ---
 
-### Installation
+## Installation
 
-#### Windows
+### Windows
+On [GitHub releases](https://github.com/SirPigari/fempeg/releases), there are **two versions**:  
 
-Download the `fempeg.exe` from [github releases](https://github.com/SirPigari/fempeg/releases)
+1. `fempeg.exe` → **Without ExifTool**  
+   - Includes only some basic EXIF info (printed to console).  
+   - Smaller file size (~3MB).  
+   - No additional dependencies required.  
 
-#### Unix
+2. `fempeg-exif.exe` → **With ExifTool**  
+   - Full EXIF support, including the `-i` interactive TUI for searching EXIF info.  
+   - Larger file size (~36MB).  
+   - No additional dependencies required.  
 
-Clone the git repository [https://github.com/SirPigari/fempeg.git](https://github.com/SirPigari/fempeg/)
+Download the version that fits your needs.
 
-Make sure you have [libraw](https://www.libraw.org/download) installed. 
+### Unix
+'''
+git clone https://github.com/SirPigari/fempeg.git
+cd fempeg
+'''
 
-cd into the cloned directory and run:
-
-```console
+- **Without ExifTool:**  
+'''
 cargo build --release
-```
+'''
 
-Then you will have the output binary in `/target/release/fempeg`
+- **With ExifTool:**  
+'''
+cargo build --release --features include_exiftool
+'''
 
-### Usage
+Make sure you have [libraw](https://www.libraw.org/download) and [exiftool](https://exiftool.org/) installed if using the `include_exiftool` feature.  
 
-Basic usage examples:
+The output binary will be in `target/release/fempeg`.
 
-- Convert a single NEF to a PNG (default when no output provided):
+---
 
-```console
+## Usage
+
+### Convert a single NEF to PNG (default)
+'''console
 fempeg ./photo.NEF
-```
+'''
 
-- Convert a single NEF to a specific output path or filename:
-
-```console
+### Convert a single NEF to a specific output path
+'''console
 fempeg photo.NEF -o ./output/photo_out.png
-```
+'''
 
-- Convert a directory of NEF files (writes outputs into an output directory):
-
-```console
+### Convert a directory of NEFs
+'''console
 fempeg ./nefs -o ./out --format png
-```
+'''
 
-- Convert to multiple formats at once (use `+` between formats):
-
-```console
+### Convert to multiple formats at once
+'''console
 fempeg photo.NEF -o ./out -f png+jpeg
-```
+'''
 
-##### Flags:
+### Flags
+- `-r, --ratio <R>` → Resize output image by ratio (0 < R <= 1), default: 0.15  
+- `-t, --threads <N>` → Number of threads to use, default: number of CPU cores  
+- `-p, --preview` → Use the embedded preview image instead of full RAW processing  
+- `-b, --brightness [VAL]` → Brightness control. Accepts `auto|none|<float>|<int>|<percent>%`. No flag = leave as-is. `-b` without value => auto  
+- `-R, --rotation <VAL>` → `auto` to use EXIF orientation or explicit degrees (90,180,270)  
+- `-e, --enhance` → Apply a light enhancement (unsharpen + small contrast)  
+- `-d, --debug` → Enable debug output  
+- `--sort <METHOD>` → Sort input files before processing (name, numeric, size, mtime)  
+- `-i, --info` → Show EXIF info about the file, exit afterwards (interactive TUI available if using ExifTool)  
+- `-h, --help` → Show help message
 
-- `-r, --ratio <R>`  : Resize output image by ratio (0 < R <= 1). Default: 0.15
-- `-t, --threads <N>`: Number of threads to use (default: number of CPU cores)
-- `-p, --preview`    : Use the embedded preview image (if available) instead of full raw processing
-- `-b, --brightness [VAL]`: Brightness control. No flag = leave as-is. `-b` without value => auto. Accepts `auto|none|<float>|<int>|<percent>%`.
-- `-R, --rotation <VAL>` : `auto` to use EXIF orientation or explicit degrees (90,180,270)
-- `-e, --enhance`    : Apply a light enhancement (unsharpen + small contrast)
-- `-d, --debug`      : Enable debug output
-- `--sort <METHOD>`  : Sort input files before processing (name, numeric, size, mtime)
-- `-h, --help`       : Show help message
+---
 
-
-### Dependencies
-
-Fempeg uses `libraw` underhood for the RAW conversion. This comes with the executable itself on windows, but on other platforms you have to install it yourself.
-
-All other dependencies are managed by `cargo`.
+## Dependencies
+- **libraw** → RAW conversion library  
+- **ExifTool** → Metadata extraction (included in Windows `fempeg-exif.exe` or via `--features include_exiftool` on Unix)  
+- **Windows users do not need to install any dependencies.**  
+- All other dependencies are managed by `cargo`
 
 > **Note:** Fempeg has been tested only with Nikon NEF files.  
 > While libraw supports most Nikon cameras, some newer or software-generated NEFs may not decode correctly.
 
-### License
+---
 
-fempeg uses the [MIT License](./LICENSE)
+## License
+- MIT License ([LICENSE](./LICENSE))  
+- [LibRaw License](./LICENSE.LibRaw)  
+- [ExifTool License](./LICENSE.ExifTool)
