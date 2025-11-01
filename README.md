@@ -1,6 +1,6 @@
 <p align="center">
    <!-- Father, forgive me for what i have sinned, i used webp -->
-  <img src="assets/fempeg-gray.webp" alt="Fempeg Logo" width="800"/>
+  <img src="assets/fempeg-white.webp" alt="Fempeg Logo" width="800"/>
 </p>
 
 ---
