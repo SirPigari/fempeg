@@ -29,20 +29,20 @@ On [GitHub releases](https://github.com/SirPigari/fempeg/releases), there are **
 Download the version that fits your needs.
 
 ### Unix
-'''
+```
 git clone https://github.com/SirPigari/fempeg.git
 cd fempeg
-'''
+```
 
 - **Without ExifTool:**  
-'''
+```
 cargo build --release
-'''
+```
 
 - **With ExifTool:**  
-'''
+```
 cargo build --release --features include_exiftool
-'''
+```
 
 Make sure you have [libraw](https://www.libraw.org/download) and [exiftool](https://exiftool.org/) installed if using the `include_exiftool` feature.  
 
@@ -53,24 +53,24 @@ The output binary will be in `target/release/fempeg`.
 ## Usage
 
 ### Convert a single NEF to PNG (default)
-'''console
+```console
 fempeg ./photo.NEF
-'''
+```
 
 ### Convert a single NEF to a specific output path
-'''console
+```console
 fempeg photo.NEF -o ./output/photo_out.png
-'''
+```
 
 ### Convert a directory of NEFs
-'''console
+```console
 fempeg ./nefs -o ./out --format png
-'''
+```
 
 ### Convert to multiple formats at once
-'''console
+```console
 fempeg photo.NEF -o ./out -f png+jpeg
-'''
+```
 
 ### Flags
 - `-r, --ratio <R>` → Resize output image by ratio (0 < R <= 1), default: 0.15  
