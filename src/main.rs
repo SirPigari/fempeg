@@ -45,7 +45,7 @@ mod term_colors;
 #[cfg(feature = "include_exiftool")]
 mod exiftool;
 
-const VALID_FORMATS: &[&str] = &["png", "jpeg", "jpg", "bmp", "gif", "webp"];
+const VALID_FORMATS: &[&str] = &["png", "jpeg", "jpg", "bmp", "gif", "webp", "tiff", "tif"];
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser, Debug)]
@@ -70,7 +70,7 @@ struct Args {
         short = 'f',
         long = "format",
         default_value = "png",
-        help = "Output image format(s), e.g. png, jpeg, bmp, gif, webp. Multiple formats can be specified separated by + (e.g. png+jpeg)"
+        help = "Output image format(s), e.g. png, jpeg, bmp, gif, webp, tiff (tif). Multiple formats can be specified separated by + or , (e.g. png+jpeg or png,jpeg)"
     )]
     format: String,
     #[arg(
@@ -223,7 +223,7 @@ fn print_metadata(path: &Path) -> Result<()> {
 
 #[cfg(feature = "include_exiftool")]
 fn print_metadata(path: &Path) -> Result<()> {
-    let json = exiftool::call_exiftool(path).context("exiftool failed")?;
+    let json = exiftool::call_exiftool(path)?;
     let map = exiftool::parse_exiftool_json(&json).unwrap_or_default();
 
     let mut entries: Vec<(String, String, String)> = Vec::new();
@@ -920,6 +920,7 @@ fn save_image(img: &DynamicImage, out_path: &Path, fmt: &str) -> Result<()> {
     let fmt = match fmt.to_ascii_lowercase().as_str() {
         "png" => ImageFormat::Png,
         "jpeg" | "jpg" => ImageFormat::Jpeg,
+        "tiff" => ImageFormat::Tiff,
         "bmp" => ImageFormat::Bmp,
         "gif" => ImageFormat::Gif,
         "webp" => ImageFormat::WebP,
@@ -1019,8 +1020,12 @@ fn main() -> Result<()> {
 
     let out_formats: Vec<String> = args
         .format
-        .split('+')
-        .map(|s| s.to_ascii_lowercase().replace("jpg", "jpeg"))
+        .split(|c| c == '+' || c == ',')
+        .map(|s| {
+            s.to_ascii_lowercase()
+                .replace("jpg", "jpeg")
+                .replace("tif", "tiff")
+        })
         .collect();
     for f in &out_formats {
         if !VALID_FORMATS.contains(&f.as_str()) {
@@ -1114,11 +1119,15 @@ fn main() -> Result<()> {
                 }
                 None => {
                     let parent = in_path
-                        .parent()
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or_else(|| PathBuf::from("."));
-                    let stem = in_path.file_stem().unwrap().to_string_lossy();
-                    out_files_for_single = Some(vec![parent.join(format!("{}.png", stem))]);
+                            .parent()
+                            .map(|p| p.to_path_buf())
+                            .unwrap_or_else(|| PathBuf::from("."));
+                        let stem = in_path.file_stem().unwrap().to_string_lossy();
+                        let mut files = Vec::new();
+                        for fmt in &out_formats {
+                            files.push(parent.join(format!("{}.{}", stem, fmt)));
+                        }
+                        out_files_for_single = Some(files);
                 }
             }
         }

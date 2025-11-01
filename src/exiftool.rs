@@ -39,7 +39,7 @@ fn linux_macos_install_hint(e: &dyn std::fmt::Display) -> anyhow::Error {
     {
         let head = blue("Failed to execute exiftool:");
         let hint = white(format!(
-            " Please install it using your package manager:\n  sudo {} install exiftool   {}\n  sudo {} install perl-image-exiftool {}\n  sudo {} -S exiftool         {}",
+            " Please install it using your package manager:\n  sudo {} install exiftool            {}\n  sudo {} install perl-image-exiftool {}\n  sudo {} -S exiftool              {}",
             pink("apt"),
             green("# Ubuntu/Debian"),
             pink("dnf"),
@@ -121,10 +121,7 @@ pub fn call_exiftool(path: &Path) -> Result<JsonValue> {
         .output()
     {
         Ok(output) if output.status.success() => merge_json_output(&output.stdout),
-        Ok(output) => Err(anyhow!(
-            "exiftool failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )),
+        Ok(output) => Err(linux_macos_install_hint(&format!("exiftool failed: {}", String::from_utf8_lossy(&output.stderr)))),
         Err(e) => Err(linux_macos_install_hint(&e)),
     }
 }
