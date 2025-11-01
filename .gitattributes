@@ -1,2 +1,1 @@
 assets/exiftool_files/** linguist-generated=true
-*.NEF filter=lfs diff=lfs merge=lfs -text

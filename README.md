@@ -98,6 +98,6 @@ fempeg photo.NEF -o ./out -f png+jpeg
 ---
 
 ## License
-- MIT License ([LICENSE](./LICENSE))  
+- [Fempeg License](./LICENSE)  
 - [LibRaw License](./LICENSE.LibRaw)  
 - [ExifTool License](./LICENSE.ExifTool)
