@@ -18,11 +18,12 @@ include_dir = { version = "0.7.4", optional = true }
 serde_json = { version = "1.0.145", optional = true }
 ratatui = { version = "0.29", optional = true, features = ["crossterm"] }
 crossterm = { version = "0.29", optional = true }
+lazy_static = "1.5.0"
 
 [features]
 default = []
 
-include_exiftool = ["serde_json", "include_dir", "ratatui", "crossterm"]
+include_exiftool = ["dep:serde_json", "dep:include_dir", "dep:ratatui", "dep:crossterm"]
 
 [profile.release]
 opt-level = 3

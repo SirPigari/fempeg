@@ -17,7 +17,7 @@
 On [GitHub releases](https://github.com/SirPigari/fempeg/releases), there are **two versions**:  
 
 1. `fempeg.exe` → **Without ExifTool**  
-   - Includes only some basic EXIF info (printed to console).  
+   - Includes only some basic EXIF info (printed to bash).  
    - Smaller file size (~3MB).  
    - No additional dependencies required.  
 
@@ -52,23 +52,40 @@ The output binary will be in `target/release/fempeg`.
 
 ## Usage
 
+Fempeg supports exporting to a wide range of image formats for maximum compatibility:
+
+- **PNG**
+- **JPEG** (or **JPG**)
+- **BMP**
+- **GIF**
+- **WebP**
+- **TIFF** (or **TIF**)
+- **TGA**
+- **ICO**
+- **HDR**
+- **OpenEXR** (or **EXR**)
+- **PNM** (PBM, PGM, PPM, PAM)
+- **Farbfeld** (or **FF**)
+- **AVIF**
+- **QOI**
+
 ### Convert a single NEF to PNG (default)
-```console
+```bash
 fempeg ./photo.NEF
 ```
 
 ### Convert a single NEF to a specific output path
-```console
+```bash
 fempeg photo.NEF -o ./output/photo_out.png
 ```
 
 ### Convert a directory of NEFs
-```console
+```bash
 fempeg ./nefs -o ./out --format png
 ```
 
 ### Convert to multiple formats at once
-```console
+```bash
 fempeg photo.NEF -o ./out -f png+jpeg
 ```
 

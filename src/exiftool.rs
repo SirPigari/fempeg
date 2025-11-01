@@ -121,7 +121,10 @@ pub fn call_exiftool(path: &Path) -> Result<JsonValue> {
         .output()
     {
         Ok(output) if output.status.success() => merge_json_output(&output.stdout),
-        Ok(output) => Err(linux_macos_install_hint(&format!("exiftool failed: {}", String::from_utf8_lossy(&output.stderr)))),
+        Ok(output) => Err(linux_macos_install_hint(&format!(
+            "exiftool failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))),
         Err(e) => Err(linux_macos_install_hint(&e)),
     }
 }

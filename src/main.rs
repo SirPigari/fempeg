@@ -1,3 +1,5 @@
+use lazy_static::lazy_static;
+use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File};
 use std::io::Read;
@@ -15,10 +17,15 @@ use crate::term_colors::{blue, dark, green, pink, red, white};
 use anyhow::{Context, Result};
 use clap::CommandFactory;
 use clap::Parser;
+use image::ImageEncoder;
+use image::codecs::farbfeld::FarbfeldEncoder;
+use image::codecs::hdr::HdrEncoder;
+use image::codecs::openexr::OpenExrEncoder;
 use image::{DynamicImage, ImageFormat, imageops::FilterType};
 use num_cpus;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
+use std::convert::TryInto;
 
 #[cfg(feature = "include_exiftool")]
 use crossterm::{
@@ -45,7 +52,65 @@ mod term_colors;
 #[cfg(feature = "include_exiftool")]
 mod exiftool;
 
-const VALID_FORMATS: &[&str] = &["png", "jpeg", "jpg", "bmp", "gif", "webp", "tiff", "tif"];
+lazy_static! {
+    pub static ref FORMAT_MAP: HashMap<&'static str, (&'static str, ImageFormat)> = {
+        let mut m = HashMap::new();
+
+        // PNG
+        m.insert("png", ("png", ImageFormat::Png));
+
+        // JPEG
+        m.insert("jpeg", ("jpeg", ImageFormat::Jpeg));
+        m.insert("jpg", ("jpeg", ImageFormat::Jpeg));
+
+        // GIF
+        m.insert("gif", ("gif", ImageFormat::Gif));
+
+        // WEBP
+        m.insert("webp", ("webp", ImageFormat::WebP));
+
+        // TIFF
+        m.insert("tiff", ("tiff", ImageFormat::Tiff));
+        m.insert("tif", ("tiff", ImageFormat::Tiff));
+
+        // TGA
+        m.insert("tga", ("tga", ImageFormat::Tga));
+
+        // BMP
+        m.insert("bmp", ("bmp", ImageFormat::Bmp));
+
+        // ICO
+        m.insert("ico", ("ico", ImageFormat::Ico));
+
+        // HDR
+        m.insert("hdr", ("hdr", ImageFormat::Hdr));
+
+        // OpenEXR
+        m.insert("exr", ("exr", ImageFormat::OpenExr));
+        m.insert("openexr", ("exr", ImageFormat::OpenExr));
+
+        // PNM (family)
+        m.insert("pnm", ("pnm", ImageFormat::Pnm));
+        m.insert("pbm", ("pnm", ImageFormat::Pnm));
+        m.insert("pgm", ("pnm", ImageFormat::Pnm));
+        m.insert("ppm", ("pnm", ImageFormat::Pnm));
+        m.insert("pam", ("pnm", ImageFormat::Pnm));
+
+        // Farbfeld
+        m.insert("ff", ("ff", ImageFormat::Farbfeld));
+        m.insert("farbfeld", ("ff", ImageFormat::Farbfeld));
+
+        // AVIF
+        m.insert("avif", ("avif", ImageFormat::Avif));
+        m.insert("av1", ("avif", ImageFormat::Avif));
+
+        // QOI
+        m.insert("qoi", ("qoi", ImageFormat::Qoi));
+
+        m
+    };
+}
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser, Debug)]
@@ -177,6 +242,10 @@ fn parse_brightness(opt: &Option<Option<String>>) -> BrightnessMode {
             }
         }
     }
+}
+
+pub fn normalize_format(fmt: &str) -> Option<(&'static str, ImageFormat)> {
+    FORMAT_MAP.get(&fmt.to_lowercase() as &str).copied()
 }
 
 #[cfg(not(feature = "include_exiftool"))]
@@ -403,14 +472,12 @@ fn print_metadata(path: &Path) -> Result<()> {
                 ];
                 let table = Table::new(rows, widths)
                     .header(header)
-                    .block(
-                        Block::default().borders(Borders::ALL).title(format!(
+                    .block(Block::default().borders(Borders::ALL).title(format!(
                             "Metadata: {}",
                             path.file_name()
                                 .map(|s| s.to_string_lossy().to_string())
                                 .unwrap_or_else(|| path.to_string_lossy().to_string())
-                        )),
-                    )
+                        )))
                     .column_spacing(1);
 
                 f.render_widget(table, chunks[0]);
@@ -917,27 +984,103 @@ unsafe fn load_with_libraw(
 }
 
 fn save_image(img: &DynamicImage, out_path: &Path, fmt: &str) -> Result<()> {
-    let fmt = match fmt.to_ascii_lowercase().as_str() {
-        "png" => ImageFormat::Png,
-        "jpeg" | "jpg" => ImageFormat::Jpeg,
-        "tiff" => ImageFormat::Tiff,
-        "bmp" => ImageFormat::Bmp,
-        "gif" => ImageFormat::Gif,
-        "webp" => ImageFormat::WebP,
-        other => anyhow::bail!("Unsupported output format: {}", other),
+    let imgfmt = match normalize_format(fmt) {
+        Some((_, f)) => f,
+        None => anyhow::bail!("Unsupported output format: {}", fmt),
     };
     let mut f =
         File::create(out_path).with_context(|| format!("Failed to create {:?}", out_path))?;
-    let bytes = match fmt {
+    let bytes = match imgfmt {
         ImageFormat::Jpeg => {
             let mut buf = Vec::new();
             img.write_to(&mut std::io::Cursor::new(&mut buf), ImageFormat::Jpeg)
                 .context("Failed to encode JPEG")?;
             buf
         }
+        ImageFormat::Hdr => {
+            let rgb8 = img.to_rgb8();
+            let (w, h) = (rgb8.width(), rgb8.height());
+            let mut data: Vec<image::Rgb<f32>> = Vec::with_capacity((w as usize) * (h as usize));
+            for p in rgb8.pixels() {
+                data.push(image::Rgb([
+                    p[0] as f32 / 255.0,
+                    p[1] as f32 / 255.0,
+                    p[2] as f32 / 255.0,
+                ]));
+            }
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            let enc = HdrEncoder::new(&mut cursor);
+            enc.encode(&data, w.try_into().unwrap(), h.try_into().unwrap())
+                .context("Failed to encode HDR")?;
+            cursor.into_inner()
+        }
+        ImageFormat::Ico => {
+            let ico_img = img.thumbnail(256, 256);
+            let mut buf = Vec::new();
+            ico_img
+                .write_to(&mut std::io::Cursor::new(&mut buf), ImageFormat::Ico)
+                .context("Failed to encode ICO")?;
+            buf
+        }
+        ImageFormat::OpenExr => {
+            let rgb8 = img.to_rgb8();
+            let (w, h) = (rgb8.width(), rgb8.height());
+            let mut data: Vec<image::Rgb<f32>> = Vec::with_capacity((w as usize) * (h as usize));
+            for p in rgb8.pixels() {
+                data.push(image::Rgb([
+                    p[0] as f32 / 255.0,
+                    p[1] as f32 / 255.0,
+                    p[2] as f32 / 255.0,
+                ]));
+            }
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            let mut bytes: Vec<u8> = Vec::with_capacity((w as usize) * (h as usize) * 3 * 4);
+            for pix in &data {
+                for &c in &pix.0 {
+                    bytes.extend_from_slice(&c.to_ne_bytes());
+                }
+            }
+            let enc = OpenExrEncoder::new(&mut cursor);
+            enc.write_image(
+                bytes.as_slice(),
+                w.try_into().unwrap(),
+                h.try_into().unwrap(),
+                image::ExtendedColorType::Rgb32F,
+            )
+            .context("Failed to encode OpenEXR")?;
+            cursor.into_inner()
+        }
+        ImageFormat::Farbfeld => {
+            let rgba8 = img.to_rgba8();
+            let (w, h) = (rgba8.width(), rgba8.height());
+            let mut data: Vec<image::Rgba<u16>> = Vec::with_capacity((w as usize) * (h as usize));
+            for p in rgba8.pixels() {
+                data.push(image::Rgba([
+                    (p[0] as u16).wrapping_mul(257),
+                    (p[1] as u16).wrapping_mul(257),
+                    (p[2] as u16).wrapping_mul(257),
+                    (p[3] as u16).wrapping_mul(257),
+                ]));
+            }
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            let mut bytes: Vec<u8> = Vec::with_capacity((w as usize) * (h as usize) * 8);
+            for pix in &data {
+                for &c in &pix.0 {
+                    bytes.extend_from_slice(&c.to_ne_bytes());
+                }
+            }
+            let enc = FarbfeldEncoder::new(&mut cursor);
+            enc.encode(
+                bytes.as_slice(),
+                w.try_into().unwrap(),
+                h.try_into().unwrap(),
+            )
+            .context("Failed to encode Farbfeld")?;
+            cursor.into_inner()
+        }
         _ => {
             let mut buf = Vec::new();
-            img.write_to(&mut std::io::Cursor::new(&mut buf), fmt)
+            img.write_to(&mut std::io::Cursor::new(&mut buf), imgfmt)
                 .context("Failed to encode image")?;
             buf
         }
@@ -1018,26 +1161,27 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let out_formats: Vec<String> = args
-        .format
-        .split(|c| c == '+' || c == ',')
-        .map(|s| {
-            s.to_ascii_lowercase()
-                .replace("jpg", "jpeg")
-                .replace("tif", "tiff")
-        })
-        .collect();
-    for f in &out_formats {
-        if !VALID_FORMATS.contains(&f.as_str()) {
-            anyhow::bail!(
-                "Unsupported format: {}. Valid formats: {}",
-                f,
-                VALID_FORMATS
+    let mut out_formats: Vec<String> = Vec::new();
+    for tok in args.format.split(|c| c == '+' || c == ',') {
+        let t = tok.trim().to_ascii_lowercase();
+        if t.is_empty() {
+            continue;
+        }
+        match normalize_format(&t) {
+            Some((canon, _imgfmt)) => {
+                out_formats.push(canon.to_string());
+            }
+            None => {
+                let mut vals: Vec<&str> = FORMAT_MAP.values().map(|(c, _)| *c).collect();
+                vals.sort();
+                vals.dedup();
+                let pretty = vals
                     .into_iter()
                     .map(|s| blue(s).to_string())
                     .collect::<Vec<_>>()
-                    .join(", ")
-            );
+                    .join(", ");
+                anyhow::bail!("Unsupported format: {}. Valid formats: {}", t, pretty);
+            }
         }
     }
     if !(args.ratio > 0.0 && args.ratio <= 1.0) {
@@ -1119,15 +1263,15 @@ fn main() -> Result<()> {
                 }
                 None => {
                     let parent = in_path
-                            .parent()
-                            .map(|p| p.to_path_buf())
-                            .unwrap_or_else(|| PathBuf::from("."));
-                        let stem = in_path.file_stem().unwrap().to_string_lossy();
-                        let mut files = Vec::new();
-                        for fmt in &out_formats {
-                            files.push(parent.join(format!("{}.{}", stem, fmt)));
-                        }
-                        out_files_for_single = Some(files);
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    let stem = in_path.file_stem().unwrap().to_string_lossy();
+                    let mut files = Vec::new();
+                    for fmt in &out_formats {
+                        files.push(parent.join(format!("{}.{}", stem, fmt)));
+                    }
+                    out_files_for_single = Some(files);
                 }
             }
         }
@@ -1293,7 +1437,7 @@ fn main() -> Result<()> {
                 handle.join().ok();
                 let elapsed = t0.elapsed().as_secs_f64();
                 println!(
-                    "\rDone conversion, output file{}: {}",
+                    "\rDone conversion, output file{}: {}    ",
                     if outs.len() > 1 { "s" } else { "" },
                     pink(out_desc)
                 );
