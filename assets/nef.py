@@ -14,13 +14,13 @@ from queue import Queue
 # The original python file
 # fempeg was inspired by and reuses parts of the code from nef.py
 # This file was written by Markofwitch about 7 months before fempeg
+# all comments were added afterwards. there were literally no comments in the original version
 # --------------------
 
 VALID_FORMATS = {'png', 'jpeg', 'jpg', 'bmp', 'gif', 'webp'}
 stop_event = Event()
 print_queue = Queue()
 progress_lock = Lock()
-
 
 def resize_image(img, ratio):
     scale = math.sqrt(ratio)
@@ -31,7 +31,7 @@ def resize_image(img, ratio):
 def apply_exif_orientation(img):
     try:
         exif = img.getexif()
-        orientation = exif.get(0x0112)
+        orientation = exif.get(0x0112) # https://exiftool.org/TagNames/EXIF.html
         if orientation == 2:
             img = ImageOps.mirror(img)
         elif orientation == 3:

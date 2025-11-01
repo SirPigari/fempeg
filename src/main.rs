@@ -20,8 +20,10 @@ use clap::Parser;
 use image::ImageEncoder;
 use image::codecs::farbfeld::FarbfeldEncoder;
 use image::codecs::hdr::HdrEncoder;
+use image::codecs::jpeg::JpegEncoder;
 use image::codecs::openexr::OpenExrEncoder;
-use image::{DynamicImage, ImageFormat, imageops::FilterType};
+use image::codecs::pnm::{PnmEncoder, PnmSubtype, SampleEncoding};
+use image::{ColorType, DynamicImage, ImageFormat, imageops::FilterType};
 use num_cpus;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
@@ -91,10 +93,10 @@ lazy_static! {
 
         // PNM (family)
         m.insert("pnm", ("pnm", ImageFormat::Pnm));
-        m.insert("pbm", ("pnm", ImageFormat::Pnm));
-        m.insert("pgm", ("pnm", ImageFormat::Pnm));
-        m.insert("ppm", ("pnm", ImageFormat::Pnm));
-        m.insert("pam", ("pnm", ImageFormat::Pnm));
+        m.insert("pbm", ("pbm", ImageFormat::Pnm));
+        m.insert("pgm", ("pgm", ImageFormat::Pnm));
+        m.insert("ppm", ("ppm", ImageFormat::Pnm));
+        m.insert("pam", ("pam", ImageFormat::Pnm));
 
         // Farbfeld
         m.insert("ff", ("ff", ImageFormat::Farbfeld));
@@ -178,6 +180,12 @@ struct Args {
         help = "Automatically enhance the image (simple unsharpen + slight contrast)"
     )]
     enhance: bool,
+    #[arg(
+        short = 'q',
+        long = "quality",
+        help = "Quality for certain image formats."
+    )]
+    quality: Option<String>,
     #[arg(
         short = 'd',
         long = "debug",
@@ -630,6 +638,20 @@ fn format_time(secs: f64) -> String {
     }
 }
 
+fn format_size(bytes: u64) -> String {
+    if bytes < 1000 {
+        format!("{} B", bytes)
+    } else if bytes < 1_000_000 {
+        format!("{:.2} KB", bytes as f64 / 1000.0)
+    } else if bytes < 1_000_000_000 {
+        format!("{:.2} MB", bytes as f64 / 1_000_000.0)
+    } else if bytes < 1_000_000_000_000 {
+        format!("{:.2} GB", bytes as f64 / 1_000_000_000.0)
+    } else {
+        format!("{:.2} TB", bytes as f64 / 1_000_000_000_000.0)
+    }
+}
+
 fn resize_image(img: DynamicImage, ratio: f64) -> DynamicImage {
     let scale = ratio.sqrt();
     let new_w = (img.width() as f64 * scale).max(1.0) as u32;
@@ -875,10 +897,7 @@ unsafe fn load_with_libraw(
     }
 
     if debug {
-        println!(
-            "{} calling libraw_dcraw_make_mem_image...",
-            blue("[mem_image]")
-        );
+        println!("{} calling libraw_dcraw_make_mem_image...", blue("[image]"));
     }
     let mut err_code: std::os::raw::c_int = 0;
     let pimg = unsafe {
@@ -887,7 +906,7 @@ unsafe fn load_with_libraw(
     if debug {
         println!(
             "{} libraw_dcraw_make_mem_image -> {:p}, err={}",
-            blue("[mem_image]"),
+            blue("[image]"),
             pimg,
             err_code
         );
@@ -921,7 +940,7 @@ unsafe fn load_with_libraw(
     if debug {
         println!(
             "{} constructing slice for data_size={}",
-            blue("[mem_image]"),
+            blue("[image]"),
             data_size
         );
     }
@@ -929,9 +948,9 @@ unsafe fn load_with_libraw(
     if debug {
         if slice.len() > 0 {
             let b = slice[0];
-            println!("{} first byte = {}", blue("[mem_image]"), b);
+            println!("{} first byte = {}", blue("[image]"), b);
         } else {
-            println!("{} slice has no bytes", blue("[mem_image]"));
+            println!("{} slice has no bytes", blue("[image]"));
         }
     }
     let img = if ty == 1 {
@@ -983,18 +1002,34 @@ unsafe fn load_with_libraw(
     Ok(img)
 }
 
-fn save_image(img: &DynamicImage, out_path: &Path, fmt: &str) -> Result<()> {
-    let imgfmt = match normalize_format(fmt) {
-        Some((_, f)) => f,
-        None => anyhow::bail!("Unsupported output format: {}", fmt),
+fn save_image(
+    img: &DynamicImage,
+    out_path: &Path,
+    fmt: &str,
+    quality: u8,
+    debug: bool,
+) -> Result<()> {
+    let (ext, imgfmt) = match normalize_format(fmt) {
+        Some((e, f)) => (e, f),
+        None => anyhow::bail!("Unsupported output format: {}", red(fmt)),
     };
+    if debug {
+        println!("{} saving image as {}", blue("[save]"), pink(&ext));
+    }
     let mut f =
         File::create(out_path).with_context(|| format!("Failed to create {:?}", out_path))?;
     let bytes = match imgfmt {
         ImageFormat::Jpeg => {
+            if debug {
+                println!(
+                    "{} using JPEG {}",
+                    blue("[save]"),
+                    pink(format!("{}%", quality))
+                );
+            }
             let mut buf = Vec::new();
-            img.write_to(&mut std::io::Cursor::new(&mut buf), ImageFormat::Jpeg)
-                .context("Failed to encode JPEG")?;
+            let mut encoder = JpegEncoder::new_with_quality(&mut buf, quality);
+            encoder.encode_image(img).context("Failed to encode JPEG")?;
             buf
         }
         ImageFormat::Hdr => {
@@ -1015,6 +1050,9 @@ fn save_image(img: &DynamicImage, out_path: &Path, fmt: &str) -> Result<()> {
             cursor.into_inner()
         }
         ImageFormat::Ico => {
+            if debug {
+                println!("{} using 256x256 thumbnail for .ico", blue("[save]"));
+            }
             let ico_img = img.thumbnail(256, 256);
             let mut buf = Vec::new();
             ico_img
@@ -1078,9 +1116,79 @@ fn save_image(img: &DynamicImage, out_path: &Path, fmt: &str) -> Result<()> {
             .context("Failed to encode Farbfeld")?;
             cursor.into_inner()
         }
-        _ => {
+        ImageFormat::Pnm if ext != "pnm" => {
+            let subtype = match ext {
+                "pbm" => PnmSubtype::Bitmap(SampleEncoding::Binary),
+                "pgm" => PnmSubtype::Graymap(SampleEncoding::Binary),
+                "ppm" => PnmSubtype::Pixmap(SampleEncoding::Binary),
+                "pam" => PnmSubtype::ArbitraryMap,
+                _ => anyhow::bail!("Unsupported PNM extension: {}", ext),
+            };
+
+            if debug {
+                match subtype {
+                    PnmSubtype::Bitmap(_) => println!(
+                        "{} using pnm subtype {} ({})",
+                        blue("[save]"),
+                        blue("Bitmap"),
+                        pink("Black and White only")
+                    ),
+                    PnmSubtype::Graymap(_) => println!(
+                        "{} using pnm subtype {} ({})",
+                        blue("[save]"),
+                        blue("Graymap"),
+                        pink("Grayscale only")
+                    ),
+                    PnmSubtype::Pixmap(_) => println!(
+                        "{} using pnm subtype {} ({})",
+                        blue("[save]"),
+                        blue("Pixmap"),
+                        pink("RGB, no alpha")
+                    ),
+                    PnmSubtype::ArbitraryMap => println!(
+                        "{} using pnm subtype {} ({})",
+                        blue("[save]"),
+                        blue("ArbitraryMap"),
+                        pink("RGBA")
+                    ),
+                }
+            }
+
+            let mut bytes = Vec::new();
+            let mut encoder = PnmEncoder::new(&mut bytes).with_subtype(subtype);
+
+            let color_type = match subtype {
+                PnmSubtype::Bitmap(_) | PnmSubtype::Graymap(_) => ColorType::L8,
+                PnmSubtype::Pixmap(_) => ColorType::Rgb8,
+                PnmSubtype::ArbitraryMap => ColorType::Rgba8,
+            };
+
+            let buffer = match subtype {
+                PnmSubtype::Bitmap(_) => img
+                    .to_luma8()
+                    .into_raw()
+                    .into_iter()
+                    .map(|b| if b > 128 { 1 } else { 0 })
+                    .collect::<Vec<u8>>(),
+                PnmSubtype::Graymap(_) => img.to_luma8().into_raw(),
+                PnmSubtype::Pixmap(_) => img.to_rgb8().into_raw(),
+                PnmSubtype::ArbitraryMap => img.to_rgba8().into_raw(),
+            };
+
+            encoder
+                .encode(
+                    buffer.as_slice(),
+                    img.width(),
+                    img.height(),
+                    color_type.into(),
+                )
+                .context("Failed to encode PNM")?;
+
+            bytes
+        }
+        imf => {
             let mut buf = Vec::new();
-            img.write_to(&mut std::io::Cursor::new(&mut buf), imgfmt)
+            img.write_to(&mut std::io::Cursor::new(&mut buf), imf)
                 .context("Failed to encode image")?;
             buf
         }
@@ -1317,6 +1425,24 @@ fn main() -> Result<()> {
         sort_inputs(&mut inputs, method.as_str(), args.debug);
     }
 
+    let quality: u8 = match args.quality {
+        Some(s) => {
+            let s = s.trim();
+            if let Some(num) = s.strip_suffix('%') {
+                num.parse::<u8>()
+                    .context("Failed to parse quality percentage")?
+            } else if s.contains('.') {
+                let f = s
+                    .parse::<f32>()
+                    .context("Failed to parse fractional quality")?;
+                (f * 100.0).round() as u8
+            } else {
+                s.parse::<u8>().context("Failed to parse integer quality")?
+            }
+        }
+        None => 75,
+    };
+
     if total == 1 && out_files_for_single.is_some() {
         let in_path = inputs.remove(0);
         let outs = out_files_for_single.take().unwrap();
@@ -1418,7 +1544,7 @@ fn main() -> Result<()> {
                         .and_then(|s| s.to_str())
                         .unwrap_or("png")
                         .to_string();
-                    if let Err(e) = save_image(&img, out_path, &fmt) {
+                    if let Err(e) = save_image(&img, out_path, &fmt, quality, args.debug) {
                         spinner_run.store(false, Ordering::SeqCst);
                         handle.join().ok();
                         eprintln!(
@@ -1436,10 +1562,27 @@ fn main() -> Result<()> {
                 spinner_run.store(false, Ordering::SeqCst);
                 handle.join().ok();
                 let elapsed = t0.elapsed().as_secs_f64();
+
+                let original_size = in_path.metadata().map(|m| m.len()).unwrap_or(0);
+                let mut converted_size = 0u64;
+                for out_path in &outs {
+                    converted_size += out_path.metadata().map(|m| m.len()).unwrap_or(0);
+                }
+
                 println!(
                     "\rDone conversion, output file{}: {}    ",
                     if outs.len() > 1 { "s" } else { "" },
                     pink(out_desc)
+                );
+                println!(
+                    "{} -> {} ({})",
+                    blue(format_size(original_size)),
+                    pink(format_size(converted_size)),
+                    if converted_size > 0 && original_size > 0 {
+                        format!("{:.1}x", converted_size as f64 / original_size as f64)
+                    } else {
+                        "N/A".to_string()
+                    }
                 );
                 println!(
                     "Total execution time: {}",
@@ -1475,6 +1618,8 @@ fn main() -> Result<()> {
 
     let start = Instant::now();
     let counter = Arc::new(Mutex::new(0usize));
+    let original_size_counter = Arc::new(Mutex::new(0u64));
+    let converted_size_counter = Arc::new(Mutex::new(0u64));
     let stop_flag = Arc::new(AtomicBool::new(false));
 
     {
@@ -1511,10 +1656,20 @@ fn main() -> Result<()> {
             let rotation_opt = args.rotation.clone();
             let enhance_flag = args.enhance;
             let counter = counter.clone();
+            let original_size_counter = original_size_counter.clone();
+            let converted_size_counter = converted_size_counter.clone();
             let total = total;
 
             let t0 = Instant::now();
             let auto_bright = matches!(brightness_mode, BrightnessMode::Auto);
+
+            let original_file_size = in_path.metadata().map(|m| m.len()).unwrap_or(0);
+            if original_file_size > 0 {
+                if let Ok(mut counter) = original_size_counter.lock() {
+                    *counter += original_file_size;
+                }
+            }
+
             if !is_nef_file(&in_path) {
                 let fname = in_path.file_name().unwrap().to_string_lossy();
                 tx.send(format!("{}... {}", fname, pink("Skipped (not NEF)")))
@@ -1524,6 +1679,9 @@ fn main() -> Result<()> {
             let res = unsafe { load_with_libraw(&in_path, preview, debug, auto_bright) };
             match res {
                 Ok(img) => {
+                    if args.debug {
+                        println!("{} rotating image...", blue("[rot]"));
+                    }
                     let mut img = resize_image(img, ratio);
                     img = apply_brightness(img, brightness_mode);
                     if let Some(rot) = rotation_opt.as_ref() {
@@ -1578,11 +1736,16 @@ fn main() -> Result<()> {
                     }
                     if let Some(ref single_outs) = out_files_for_single {
                         for (fmt, out_path) in out_formats.iter().zip(single_outs.iter()) {
-                            if let Err(e) = save_image(&img, out_path, fmt) {
+                            if let Err(e) = save_image(&img, out_path, fmt, quality, args.debug) {
                                 let fname = in_path.file_name().unwrap().to_string_lossy();
                                 tx.send(format!("{}... {}: {}", fname, red("Error saving"), e))
                                     .ok();
                                 return;
+                            }
+                            if let Ok(meta) = out_path.metadata() {
+                                if let Ok(mut counter) = converted_size_counter.lock() {
+                                    *counter += meta.len();
+                                }
                             }
                         }
                     } else {
@@ -1599,10 +1762,17 @@ fn main() -> Result<()> {
                                     fmt
                                 );
                                 let out_path = parent.join(out_name);
-                                if let Err(e) = save_image(&img, &out_path, fmt) {
+                                if let Err(e) =
+                                    save_image(&img, &out_path, fmt, quality, args.debug)
+                                {
                                     tx.send(format!("{}... {}: {}", fname, red("Error saving"), e))
                                         .ok();
                                     return;
+                                }
+                                if let Ok(meta) = out_path.metadata() {
+                                    if let Ok(mut counter) = converted_size_counter.lock() {
+                                        *counter += meta.len();
+                                    }
                                 }
                             }
                         } else {
@@ -1613,10 +1783,17 @@ fn main() -> Result<()> {
                                     fmt
                                 );
                                 let out_path = out_dir.join(out_name);
-                                if let Err(e) = save_image(&img, &out_path, fmt) {
+                                if let Err(e) =
+                                    save_image(&img, &out_path, fmt, quality, args.debug)
+                                {
                                     tx.send(format!("{}... {}: {}", fname, red("Error saving"), e))
                                         .ok();
                                     return;
+                                }
+                                if let Ok(meta) = out_path.metadata() {
+                                    if let Ok(mut counter) = converted_size_counter.lock() {
+                                        *counter += meta.len();
+                                    }
                                 }
                             }
                         }
@@ -1654,6 +1831,20 @@ fn main() -> Result<()> {
     } else {
         println!("\n{}", green("All conversions completed."));
     }
+
+    let original_total = original_size_counter.lock().map(|c| *c).unwrap_or(0);
+    let converted_total = converted_size_counter.lock().map(|c| *c).unwrap_or(0);
+
+    println!(
+        "Converted total: {} -> {} ({})",
+        blue(format_size(original_total)),
+        pink(format_size(converted_total)),
+        if converted_total > 0 && original_total > 0 {
+            format!("{:.1}x", converted_total as f64 / original_total as f64)
+        } else {
+            "N/A".to_string()
+        }
+    );
     println!("Total execution time: {}", blue(format_time(total_time)));
 
     Ok(())
