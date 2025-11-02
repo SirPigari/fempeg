@@ -806,81 +806,99 @@ unsafe fn load_with_libraw(
     let _ = unsafe { (api.libraw_set_no_auto_bright)(raw, no_auto_val) };
 
     if use_preview {
-        let mut err_code: std::os::raw::c_int = 0;
-        let pimg = unsafe {
-            (api.libraw_dcraw_make_mem_image)(raw, &mut err_code as *mut std::os::raw::c_int)
-        };
-        if !pimg.is_null() {
-            let ty = unsafe { (*pimg).type_ };
-            let data_size = unsafe { (*pimg).data_size as usize };
-            if data_size > 0 {
-                let header_size = std::mem::size_of::<libraw_ffi::LibRawProcessedImage>();
-                let data_ptr = (pimg as *const u8).wrapping_add(header_size) as *const u8;
-                let slice = unsafe { std::slice::from_raw_parts(data_ptr, data_size) };
-                if ty == 1 {
-                    let img = image::load_from_memory(slice)
-                        .context("Failed to decode preview JPEG from libraw")?;
-                    unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
-                    unsafe { (api.libraw_close)(raw) };
-                    return Ok(img);
-                } else {
-                    let colors = unsafe { (*pimg).colors as usize };
-                    let width = unsafe { (*pimg).width as u32 };
-                    let height = unsafe { (*pimg).height as u32 };
-                    let bits = unsafe { (*pimg).bits };
-                    if bits != 8 {
-                        unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
-                        unsafe { (api.libraw_close)(raw) };
-                        anyhow::bail!("libraw preview bitmap has unsupported bit depth: {}", bits);
-                    }
-                    let expected = (width as usize) * (height as usize) * colors;
-                    if data_size < expected {
-                        unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
-                        unsafe { (api.libraw_close)(raw) };
-                        anyhow::bail!(
-                            "libraw preview bitmap too small: {} < {}",
-                            data_size,
-                            expected
-                        );
-                    }
-                    let vec = slice[..expected].to_vec();
-                    let result_img = match colors {
-                        3 => {
-                            let imgbuf = image::RgbImage::from_raw(width, height, vec)
-                                .context("Failed to construct RGB image from libraw preview")?;
-                            DynamicImage::ImageRgb8(imgbuf)
-                        }
-                        4 => {
-                            let imgbuf = image::RgbaImage::from_raw(width, height, vec)
-                                .context("Failed to construct RGBA image from libraw.preview")?;
-                            DynamicImage::ImageRgba8(imgbuf)
-                        }
-                        _ => {
-                            unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
-                            unsafe { (api.libraw_close)(raw) };
-                            anyhow::bail!("Unsupported preview colors: {}", colors);
-                        }
-                    };
-                    unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
-                    unsafe { (api.libraw_close)(raw) };
-                    return Ok(result_img);
-                }
-            }
-            unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
-        }
-        let err_msg = unsafe {
-            let p = (api.libraw_strerror)(err_code);
-            if p.is_null() {
-                "(unknown)".into()
-            } else {
-                std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
-            }
-        };
         if debug {
-            eprintln!(
-                "libraw dcraw_make_mem_image preview returned null or empty (err={} msg={}), continuing to full processing",
-                err_code, err_msg
+            println!("{} using thumbnail extraction...", blue("[preview]"));
+        }
+        let r = unsafe { (api.libraw_unpack_thumb)(raw) };
+        if debug {
+            println!("{} libraw_unpack_thumb -> {}", blue("[preview]"), r);
+        }
+        if r != 0 {
+            let err_msg = format!("libraw_unpack_thumb failed with code {}", r);
+            if debug {
+                eprintln!("[preview] {}", err_msg);
+            }
+            unsafe { (api.libraw_close)(raw) };
+            anyhow::bail!("Preview extraction failed: {}", err_msg);
+        }
+
+        let mut err_code: std::os::raw::c_int = 0;
+        if debug {
+            println!("{} calling libraw_dcraw_make_mem_thumb...", blue("[preview]"));
+        }
+        let pimg = unsafe { (api.libraw_dcraw_make_mem_thumb)(raw, &mut err_code as *mut std::os::raw::c_int) };
+        if debug {
+            println!(
+                "{} libraw_dcraw_make_mem_thumb -> {:p}, err={}",
+                blue("[preview]"),
+                pimg,
+                err_code
             );
+        }
+        if pimg.is_null() {
+            let err_msg = unsafe {
+                let p = (api.libraw_strerror)(err_code);
+                if p.is_null() { "(unknown)".into() } else { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() }
+            };
+            if debug {
+                eprintln!("[preview] dcraw_make_mem_thumb failed: {}", err_msg);
+            }
+            unsafe { (api.libraw_close)(raw) };
+            anyhow::bail!("Preview extraction failed: {}", err_msg);
+        }
+
+        let ty = unsafe { (*pimg).type_ };
+        let data_size = unsafe { (*pimg).data_size as usize };
+        if data_size == 0 {
+            unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
+            unsafe { (api.libraw_close)(raw) };
+            anyhow::bail!("Preview extraction failed: thumbnail has no data");
+        }
+        let header_size = std::mem::size_of::<libraw_ffi::LibRawProcessedImage>();
+        let data_ptr = (pimg as *const u8).wrapping_add(header_size) as *const u8;
+        let slice = unsafe { std::slice::from_raw_parts(data_ptr, data_size) };
+        if ty == 1 {
+            let img = image::load_from_memory(slice).context("Failed to decode preview JPEG from libraw")?;
+            unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
+            unsafe { (api.libraw_close)(raw) };
+            return Ok(img);
+        } else {
+            let colors = unsafe { (*pimg).colors as usize };
+            let width = unsafe { (*pimg).width as u32 };
+            let height = unsafe { (*pimg).height as u32 };
+            let bits = unsafe { (*pimg).bits };
+            if bits != 8 {
+                unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
+                unsafe { (api.libraw_close)(raw) };
+                anyhow::bail!("libraw preview bitmap has unsupported bit depth: {}", bits);
+            }
+            let expected = (width as usize) * (height as usize) * colors;
+            if data_size < expected {
+                unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
+                unsafe { (api.libraw_close)(raw) };
+                anyhow::bail!("libraw preview bitmap too small: {} < {}", data_size, expected);
+            }
+            let vec = slice[..expected].to_vec();
+            let result_img = match colors {
+                3 => {
+                    let imgbuf = image::RgbImage::from_raw(width, height, vec)
+                        .context("Failed to construct RGB image from libraw preview")?;
+                    DynamicImage::ImageRgb8(imgbuf)
+                }
+                4 => {
+                    let imgbuf = image::RgbaImage::from_raw(width, height, vec)
+                        .context("Failed to construct RGBA image from libraw.preview")?;
+                    DynamicImage::ImageRgba8(imgbuf)
+                }
+                _ => {
+                    unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
+                    unsafe { (api.libraw_close)(raw) };
+                    anyhow::bail!("Unsupported preview colors: {}", colors);
+                }
+            };
+            unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
+            unsafe { (api.libraw_close)(raw) };
+            return Ok(result_img);
         }
     }
 
@@ -1197,6 +1215,18 @@ fn save_image(
     Ok(())
 }
 
+fn write_jpeg_fast(img: &DynamicImage, out_path: &Path, quality: u8, debug: bool) -> Result<()> {
+    if debug {
+        println!("{} writing quick JPEG {}", blue("[preview]"), out_path.display());
+    }
+    let mut f = File::create(out_path).with_context(|| format!("Failed to create {:?}", out_path))?;
+    let mut buf = Vec::new();
+    let mut encoder = JpegEncoder::new_with_quality(&mut buf, quality);
+    encoder.encode_image(img).context("Failed to encode JPEG for preview")?;
+    f.write_all(&buf)?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let raw_args: Vec<String> = env::args().collect();
     if raw_args.iter().any(|a| a == "-h" || a == "--help") {
@@ -1290,6 +1320,17 @@ fn main() -> Result<()> {
                     .join(", ");
                 anyhow::bail!("Unsupported format: {}. Valid formats: {}", t, pretty);
             }
+        }
+    }
+    if args.preview {
+        if out_formats == ["png"] {
+            out_formats = vec!["jpeg".to_string()];
+        } else if out_formats.iter().any(|f| f != "jpeg") {
+            eprintln!(
+                "{}",
+                red("Preview mode only supports JPEG output.")
+            );
+            anyhow::bail!("Preview mode only supports JPEG output.");
         }
     }
     if !(args.ratio > 0.0 && args.ratio <= 1.0) {
@@ -1544,7 +1585,22 @@ fn main() -> Result<()> {
                         .and_then(|s| s.to_str())
                         .unwrap_or("png")
                         .to_string();
-                    if let Err(e) = save_image(&img, out_path, &fmt, quality, args.debug) {
+                    if args.preview {
+                        if let Err(e) = write_jpeg_fast(&img, out_path, quality, args.debug) {
+                            spinner_run.store(false, Ordering::SeqCst);
+                            handle.join().ok();
+                            eprintln!(
+                                "{}",
+                                pink(format!(
+                                    "\n{} {}: {}",
+                                    red("Error saving preview"),
+                                    out_path.display(),
+                                    e
+                                ))
+                            );
+                            return Err(e);
+                        }
+                    } else if let Err(e) = save_image(&img, out_path, &fmt, quality, args.debug) {
                         spinner_run.store(false, Ordering::SeqCst);
                         handle.join().ok();
                         eprintln!(
@@ -1736,7 +1792,14 @@ fn main() -> Result<()> {
                     }
                     if let Some(ref single_outs) = out_files_for_single {
                         for (fmt, out_path) in out_formats.iter().zip(single_outs.iter()) {
-                            if let Err(e) = save_image(&img, out_path, fmt, quality, args.debug) {
+                            if preview {
+                                if let Err(e) = write_jpeg_fast(&img, out_path, quality, debug) {
+                                    let fname = in_path.file_name().unwrap().to_string_lossy();
+                                    tx.send(format!("{}... {}: {}", fname, red("Error saving preview"), e))
+                                        .ok();
+                                    return;
+                                }
+                            } else if let Err(e) = save_image(&img, out_path, fmt, quality, args.debug) {
                                 let fname = in_path.file_name().unwrap().to_string_lossy();
                                 tx.send(format!("{}... {}: {}", fname, red("Error saving"), e))
                                     .ok();
@@ -1762,8 +1825,13 @@ fn main() -> Result<()> {
                                     fmt
                                 );
                                 let out_path = parent.join(out_name);
-                                if let Err(e) =
-                                    save_image(&img, &out_path, fmt, quality, args.debug)
+                                if preview {
+                                    if let Err(e) = write_jpeg_fast(&img, &out_path, quality, debug) {
+                                        tx.send(format!("{}... {}: {}", fname, red("Error saving preview"), e))
+                                            .ok();
+                                        return;
+                                    }
+                                } else if let Err(e) = save_image(&img, &out_path, fmt, quality, args.debug)
                                 {
                                     tx.send(format!("{}... {}: {}", fname, red("Error saving"), e))
                                         .ok();
@@ -1783,8 +1851,13 @@ fn main() -> Result<()> {
                                     fmt
                                 );
                                 let out_path = out_dir.join(out_name);
-                                if let Err(e) =
-                                    save_image(&img, &out_path, fmt, quality, args.debug)
+                                if preview {
+                                    if let Err(e) = write_jpeg_fast(&img, &out_path, quality, debug) {
+                                        tx.send(format!("{}... {}: {}", fname, red("Error saving preview"), e))
+                                            .ok();
+                                        return;
+                                    }
+                                } else if let Err(e) = save_image(&img, &out_path, fmt, quality, args.debug)
                                 {
                                     tx.send(format!("{}... {}: {}", fname, red("Error saving"), e))
                                         .ok();

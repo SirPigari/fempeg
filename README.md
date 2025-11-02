@@ -7,7 +7,7 @@
 
 # Fempeg
 
-**Fempeg** is a Rust program that converts Nikon **NEF** RAW files into processed image formats like PNG or JPEG.
+**Fempeg** is a Rust tool that converts Nikon **NEF** RAW files into processed image formats like PNG or JPEG.
 
 ---
 
