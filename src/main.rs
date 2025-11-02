@@ -58,55 +58,41 @@ lazy_static! {
     pub static ref FORMAT_MAP: HashMap<&'static str, (&'static str, ImageFormat)> = {
         let mut m = HashMap::new();
 
-        // PNG
         m.insert("png", ("png", ImageFormat::Png));
 
-        // JPEG
         m.insert("jpeg", ("jpeg", ImageFormat::Jpeg));
         m.insert("jpg", ("jpeg", ImageFormat::Jpeg));
 
-        // GIF
         m.insert("gif", ("gif", ImageFormat::Gif));
 
-        // WEBP
         m.insert("webp", ("webp", ImageFormat::WebP));
 
-        // TIFF
         m.insert("tiff", ("tiff", ImageFormat::Tiff));
         m.insert("tif", ("tiff", ImageFormat::Tiff));
 
-        // TGA
         m.insert("tga", ("tga", ImageFormat::Tga));
 
-        // BMP
         m.insert("bmp", ("bmp", ImageFormat::Bmp));
 
-        // ICO
         m.insert("ico", ("ico", ImageFormat::Ico));
 
-        // HDR
         m.insert("hdr", ("hdr", ImageFormat::Hdr));
 
-        // OpenEXR
         m.insert("exr", ("exr", ImageFormat::OpenExr));
         m.insert("openexr", ("exr", ImageFormat::OpenExr));
 
-        // PNM (family)
         m.insert("pnm", ("pnm", ImageFormat::Pnm));
         m.insert("pbm", ("pbm", ImageFormat::Pnm));
         m.insert("pgm", ("pgm", ImageFormat::Pnm));
         m.insert("ppm", ("ppm", ImageFormat::Pnm));
         m.insert("pam", ("pam", ImageFormat::Pnm));
 
-        // Farbfeld
         m.insert("ff", ("ff", ImageFormat::Farbfeld));
         m.insert("farbfeld", ("ff", ImageFormat::Farbfeld));
 
-        // AVIF
         m.insert("avif", ("avif", ImageFormat::Avif));
         m.insert("av1", ("avif", ImageFormat::Avif));
 
-        // QOI
         m.insert("qoi", ("qoi", ImageFormat::Qoi));
 
         m
@@ -160,6 +146,13 @@ struct Args {
         help = "Use embedded preview image if available"
     )]
     preview: bool,
+        #[arg(
+        short = 'P',
+        long = "preview-index",
+        default_value_t = 4,
+        help = "Preview image index to export."
+    )]
+    preview_index: u8,
     #[arg(
         short = 'b',
         long = "brightness",
@@ -752,10 +745,10 @@ fn sort_inputs(inputs: &mut Vec<PathBuf>, method: &str, debug: bool) {
 
 unsafe fn load_with_libraw(
     path: &Path,
-    use_preview: bool,
     debug: bool,
     auto_brightness: bool,
 ) -> Result<DynamicImage> {
+    
     let api = libraw_ffi::get_api().context("Failed to load libraw symbols")?;
     if debug {
         println!("{} calling libraw_init...", blue("[init]"));
@@ -804,103 +797,6 @@ unsafe fn load_with_libraw(
     let _ = unsafe { (api.libraw_set_output_color)(raw, 1) };
     let no_auto_val = if auto_brightness { 0 } else { 1 };
     let _ = unsafe { (api.libraw_set_no_auto_bright)(raw, no_auto_val) };
-
-    if use_preview {
-        if debug {
-            println!("{} using thumbnail extraction...", blue("[preview]"));
-        }
-        let r = unsafe { (api.libraw_unpack_thumb)(raw) };
-        if debug {
-            println!("{} libraw_unpack_thumb -> {}", blue("[preview]"), r);
-        }
-        if r != 0 {
-            let err_msg = format!("libraw_unpack_thumb failed with code {}", r);
-            if debug {
-                eprintln!("[preview] {}", err_msg);
-            }
-            unsafe { (api.libraw_close)(raw) };
-            anyhow::bail!("Preview extraction failed: {}", err_msg);
-        }
-
-        let mut err_code: std::os::raw::c_int = 0;
-        if debug {
-            println!("{} calling libraw_dcraw_make_mem_thumb...", blue("[preview]"));
-        }
-        let pimg = unsafe { (api.libraw_dcraw_make_mem_thumb)(raw, &mut err_code as *mut std::os::raw::c_int) };
-        if debug {
-            println!(
-                "{} libraw_dcraw_make_mem_thumb -> {:p}, err={}",
-                blue("[preview]"),
-                pimg,
-                err_code
-            );
-        }
-        if pimg.is_null() {
-            let err_msg = unsafe {
-                let p = (api.libraw_strerror)(err_code);
-                if p.is_null() { "(unknown)".into() } else { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() }
-            };
-            if debug {
-                eprintln!("[preview] dcraw_make_mem_thumb failed: {}", err_msg);
-            }
-            unsafe { (api.libraw_close)(raw) };
-            anyhow::bail!("Preview extraction failed: {}", err_msg);
-        }
-
-        let ty = unsafe { (*pimg).type_ };
-        let data_size = unsafe { (*pimg).data_size as usize };
-        if data_size == 0 {
-            unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
-            unsafe { (api.libraw_close)(raw) };
-            anyhow::bail!("Preview extraction failed: thumbnail has no data");
-        }
-        let header_size = std::mem::size_of::<libraw_ffi::LibRawProcessedImage>();
-        let data_ptr = (pimg as *const u8).wrapping_add(header_size) as *const u8;
-        let slice = unsafe { std::slice::from_raw_parts(data_ptr, data_size) };
-        if ty == 1 {
-            let img = image::load_from_memory(slice).context("Failed to decode preview JPEG from libraw")?;
-            unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
-            unsafe { (api.libraw_close)(raw) };
-            return Ok(img);
-        } else {
-            let colors = unsafe { (*pimg).colors as usize };
-            let width = unsafe { (*pimg).width as u32 };
-            let height = unsafe { (*pimg).height as u32 };
-            let bits = unsafe { (*pimg).bits };
-            if bits != 8 {
-                unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
-                unsafe { (api.libraw_close)(raw) };
-                anyhow::bail!("libraw preview bitmap has unsupported bit depth: {}", bits);
-            }
-            let expected = (width as usize) * (height as usize) * colors;
-            if data_size < expected {
-                unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
-                unsafe { (api.libraw_close)(raw) };
-                anyhow::bail!("libraw preview bitmap too small: {} < {}", data_size, expected);
-            }
-            let vec = slice[..expected].to_vec();
-            let result_img = match colors {
-                3 => {
-                    let imgbuf = image::RgbImage::from_raw(width, height, vec)
-                        .context("Failed to construct RGB image from libraw preview")?;
-                    DynamicImage::ImageRgb8(imgbuf)
-                }
-                4 => {
-                    let imgbuf = image::RgbaImage::from_raw(width, height, vec)
-                        .context("Failed to construct RGBA image from libraw.preview")?;
-                    DynamicImage::ImageRgba8(imgbuf)
-                }
-                _ => {
-                    unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
-                    unsafe { (api.libraw_close)(raw) };
-                    anyhow::bail!("Unsupported preview colors: {}", colors);
-                }
-            };
-            unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
-            unsafe { (api.libraw_close)(raw) };
-            return Ok(result_img);
-        }
-    }
 
     if debug {
         println!("{} calling libraw_dcraw_process...", blue("[process]"));
@@ -1018,6 +914,151 @@ unsafe fn load_with_libraw(
     unsafe { (api.libraw_dcraw_clear_mem)(pimg) };
     unsafe { (api.libraw_close)(raw) };
     Ok(img)
+}
+
+unsafe fn load_image(
+    path: &Path,
+    use_preview: bool,
+    preview_index: u8,
+    debug: bool,
+    auto_brightness: bool,
+) -> Result<DynamicImage> {
+    if use_preview {
+        if debug {
+            println!(
+                "{} extracting preview index {}...",
+                blue("[preview]"),
+                pink(preview_index)
+            );
+        }
+
+        use std::io::Cursor;
+        use exif::{Reader, Tag, In};
+
+        let mut file = File::open(path).context("failed to open NEF file")?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+
+        let exif = Reader::new()
+            .read_from_container(&mut Cursor::new(&buf))
+            .ok();
+
+        let mut candidates: Vec<(usize, usize)> = Vec::new();
+
+        if let Some(exif) = &exif {
+            for space in [In::PRIMARY, In::THUMBNAIL] {
+                if let (Some(off), Some(len)) = (
+                    exif.get_field(Tag::JPEGInterchangeFormat, space)
+                        .and_then(|f| f.value.get_uint(0)),
+                    exif.get_field(Tag::JPEGInterchangeFormatLength, space)
+                        .and_then(|f| f.value.get_uint(0)),
+                ) {
+                    let o = off as usize;
+                    let l = len as usize;
+                    if o + l <= buf.len() && l > 10 * 1024 {
+                        candidates.push((o, l));
+                    }
+                }
+            }
+        }
+
+        let mut pos = 0;
+        while let Some(start) = buf[pos..].windows(3).position(|w| w == b"\xFF\xD8\xFF") {
+            let start = pos + start;
+            if let Some(end_rel) = buf[start..].windows(2).position(|w| w == b"\xFF\xD9") {
+                let end = start + end_rel + 2;
+                if end > start && end <= buf.len() {
+                    let len = end - start;
+                    if len > 10 * 1024 {
+                        candidates.push((start, len));
+                    }
+                    pos = end;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        if candidates.is_empty() {
+            anyhow::bail!("no embedded JPEG previews found");
+        }
+
+        candidates.sort_by_key(|(_, len)| *len);
+
+        let mut idx = preview_index as usize;
+        if idx >= candidates.len() {
+            if debug {
+                println!(
+                    "{} requested index {} out of range ({} found), using closest ({})",
+                    blue("[preview]"),
+                    pink(preview_index),
+                    pink(candidates.len()),
+                    pink(candidates.len() - 1)
+                );
+            }
+            idx = candidates.len() - 1;
+        }
+
+        let mut selected = None;
+        let mut i = idx as isize;
+        let mut step = 0isize;
+        loop {
+            if i < 0 || i as usize >= candidates.len() {
+                break;
+            }
+
+            let (offset, length) = candidates[i as usize];
+            let jpeg_data = &buf[offset..offset + length];
+
+            if jpeg_data.starts_with(b"\xFF\xD8") && jpeg_data.ends_with(b"\xFF\xD9") {
+                if debug {
+                    println!(
+                        "{} found {} previews, decoding index {} ({} bytes @ {})",
+                        blue("[preview]"),
+                        pink(candidates.len()),
+                        pink(i),
+                        pink(length),
+                        pink(offset)
+                    );
+                }
+
+                match image::load_from_memory(jpeg_data) {
+                    Ok(img) => {
+                        selected = Some((i as usize, img));
+                        break;
+                    }
+                    Err(_) => {
+                        if debug {
+                            println!(
+                                "{} index {} failed to decode, trying next nearest...",
+                                blue("[preview]"),
+                                pink(i)
+                            );
+                        }
+                    }
+                }
+            }
+
+            step += 1;
+            i = idx as isize + if step % 2 == 1 { step } else { -step };
+        }
+
+        let (used_idx, img) = selected.ok_or_else(|| anyhow::anyhow!("no valid JPEG preview found"))?;
+
+        if debug {
+            println!(
+                "{} decoded preview index {} ({}×{})",
+                blue("[preview]"),
+                pink(used_idx),
+                pink(img.width()),
+                pink(img.height())
+            );
+        }
+
+        Ok(img)
+    } else {
+        unsafe { load_with_libraw(path, debug, auto_brightness) }
+    }
 }
 
 fn save_image(
@@ -1528,12 +1569,13 @@ fn main() -> Result<()> {
                 in_path.display()
             ))));
         }
-        let res = unsafe { load_with_libraw(&in_path, args.preview, args.debug, auto_bright) };
+        
+        let res = unsafe { load_image(&in_path, args.preview, args.preview_index, args.debug, auto_bright) };
         match res {
             Ok(img) => {
                 let mut img = resize_image(img, args.ratio);
                 img = apply_brightness(img, brightness_mode);
-                if let Some(rot) = args.rotation.as_ref() {
+                if !args.preview && let Some(rot) = args.rotation.as_ref() {
                     if rot == "auto" {
                         if let Ok(buf) = std::fs::read(&in_path) {
                             if let Ok(exif) = rexif::parse_buffer(&buf) {
@@ -1707,6 +1749,7 @@ fn main() -> Result<()> {
             let out_formats = out_formats.clone();
             let ratio = args.ratio;
             let preview = args.preview;
+            let preview_index = args.preview_index;
             let debug = debug;
             let brightness_mode = parse_brightness(&args.brightness);
             let rotation_opt = args.rotation.clone();
@@ -1732,7 +1775,7 @@ fn main() -> Result<()> {
                     .ok();
                 return;
             }
-            let res = unsafe { load_with_libraw(&in_path, preview, debug, auto_bright) };
+            let res = unsafe { load_image(&in_path, preview, preview_index, debug, auto_bright) };
             match res {
                 Ok(img) => {
                     if args.debug {
@@ -1740,7 +1783,7 @@ fn main() -> Result<()> {
                     }
                     let mut img = resize_image(img, ratio);
                     img = apply_brightness(img, brightness_mode);
-                    if let Some(rot) = rotation_opt.as_ref() {
+                    if !preview && let Some(rot) = rotation_opt.as_ref() {
                         if rot == "auto" {
                             if let Ok(buf) = std::fs::read(&in_path) {
                                 if let Ok(exif) = rexif::parse_buffer(&buf) {

@@ -23,9 +23,6 @@ pub struct LibRawApi {
     pub libraw_dcraw_process: unsafe extern "C" fn(*mut libraw_data_t) -> c_int,
     pub libraw_dcraw_make_mem_image:
         unsafe extern "C" fn(*mut libraw_data_t, *mut c_int) -> *mut LibRawProcessedImage,
-    pub libraw_dcraw_make_mem_thumb:
-        unsafe extern "C" fn(*mut libraw_data_t, *mut c_int) -> *mut LibRawProcessedImage,
-    pub libraw_unpack_thumb: unsafe extern "C" fn(*mut libraw_data_t) -> c_int,
     pub libraw_dcraw_clear_mem: unsafe extern "C" fn(*mut LibRawProcessedImage),
     pub libraw_close: unsafe extern "C" fn(*mut libraw_data_t),
     pub libraw_strerror: unsafe extern "C" fn(c_int) -> *const c_char,
@@ -58,13 +55,6 @@ pub fn get_api() -> anyhow::Result<&'static LibRawApi> {
             > = lib
                 .get(b"libraw_dcraw_make_mem_image\0")
                 .map_err(|e| anyhow::anyhow!(e))?;
-            let s_make_thumb: libloading::Symbol<
-                unsafe extern "C" fn(*mut libraw_data_t, *mut c_int) -> *mut LibRawProcessedImage,
-            > = lib
-                .get(b"libraw_dcraw_make_mem_thumb\0")
-                .map_err(|e| anyhow::anyhow!(e))?;
-            let s_unpack_thumb: libloading::Symbol<unsafe extern "C" fn(*mut libraw_data_t) -> c_int> =
-                lib.get(b"libraw_unpack_thumb\0").map_err(|e| anyhow::anyhow!(e))?;
             let s_clear_mem: libloading::Symbol<unsafe extern "C" fn(*mut LibRawProcessedImage)> =
                 lib.get(b"libraw_dcraw_clear_mem\0")
                     .map_err(|e| anyhow::anyhow!(e))?;
@@ -95,8 +85,6 @@ pub fn get_api() -> anyhow::Result<&'static LibRawApi> {
                 libraw_unpack: *s_unpack,
                 libraw_dcraw_process: *s_process,
                 libraw_dcraw_make_mem_image: *s_make_mem,
-                libraw_dcraw_make_mem_thumb: *s_make_thumb,
-                libraw_unpack_thumb: *s_unpack_thumb,
                 libraw_dcraw_clear_mem: *s_clear_mem,
                 libraw_close: *s_close,
                 libraw_strerror: *s_strerror,
