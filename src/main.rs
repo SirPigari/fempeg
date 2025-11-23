@@ -13,7 +13,7 @@ use std::sync::{
 use std::thread;
 use std::time::Instant;
 
-use crate::term_colors::{blue, dark, green, pink, red, white};
+use crate::term_colors::{blue, green, pink, red, white};
 use anyhow::{Context, Result};
 use clap::CommandFactory;
 use clap::Parser;
@@ -146,7 +146,7 @@ struct Args {
         help = "Use embedded preview image if available"
     )]
     preview: bool,
-        #[arg(
+    #[arg(
         short = 'P',
         long = "preview-index",
         default_value_t = 4,
@@ -748,7 +748,6 @@ unsafe fn load_with_libraw(
     debug: bool,
     auto_brightness: bool,
 ) -> Result<DynamicImage> {
-    
     let api = libraw_ffi::get_api().context("Failed to load libraw symbols")?;
     if debug {
         println!("{} calling libraw_init...", blue("[init]"));
@@ -932,8 +931,88 @@ unsafe fn load_image(
             );
         }
 
+        #[cfg(feature = "include_exiftool")]
+        {
+            if debug {
+                println!(
+                    "{} using exiftool for preview extraction...",
+                    blue("[preview]")
+                );
+            }
+
+            match exiftool::extract_preview_image(path) {
+                Ok(preview_data) => {
+                    if debug {
+                        println!(
+                            "{} extracted {} bytes via exiftool",
+                            blue("[preview]"),
+                            pink(preview_data.len())
+                        );
+                    }
+
+                    match image::load_from_memory(&preview_data) {
+                        Ok(mut img) => {
+                            if debug {
+                                println!(
+                                    "{} decoded preview ({}×{})",
+                                    blue("[preview]"),
+                                    pink(img.width()),
+                                    pink(img.height())
+                                );
+                            }
+                            
+                            if let Ok(file_buf) = std::fs::read(path) {
+                                if let Ok(exif_data) = rexif::parse_buffer(&file_buf) {
+                                    for entry in exif_data.entries.iter() {
+                                        let tag_name = format!("{}", entry.tag).to_lowercase();
+                                        if tag_name.contains("orientation") {
+                                            let sval = format!("{}", entry.value);
+                                            if let Some(tok) = sval.split_whitespace().next() {
+                                                if let Ok(code) = tok.parse::<u32>() {
+                                                    if debug {
+                                                        println!("{} applying EXIF rotation (orientation={})", blue("[preview]"), pink(code));
+                                                    }
+                                                    img = match code {
+                                                        3 => DynamicImage::ImageRgba8(image::imageops::rotate180(&img)),
+                                                        6 => DynamicImage::ImageRgba8(image::imageops::rotate90(&img)),
+                                                        8 => DynamicImage::ImageRgba8(image::imageops::rotate270(&img)),
+                                                        _ => img,
+                                                    };
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            return Ok(img);
+                        }
+                        Err(e) => {
+                            if debug {
+                                eprintln!(
+                                    "{} exiftool preview decode failed: {}, falling back...",
+                                    blue("[preview]"),
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if debug {
+                        eprintln!(
+                            "{} exiftool extraction failed: {}, falling back...",
+                            blue("[preview]"),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        use exif::{In, Reader, Tag};
         use std::io::Cursor;
-        use exif::{Reader, Tag, In};
 
         let mut file = File::open(path).context("failed to open NEF file")?;
         let mut buf = Vec::new();
@@ -1043,7 +1122,8 @@ unsafe fn load_image(
             i = idx as isize + if step % 2 == 1 { step } else { -step };
         }
 
-        let (used_idx, img) = selected.ok_or_else(|| anyhow::anyhow!("no valid JPEG preview found"))?;
+        let (used_idx, mut img) =
+            selected.ok_or_else(|| anyhow::anyhow!("no valid JPEG preview found"))?;
 
         if debug {
             println!(
@@ -1053,6 +1133,29 @@ unsafe fn load_image(
                 pink(img.width()),
                 pink(img.height())
             );
+        }
+
+        if let Ok(exif_data) = rexif::parse_buffer(&buf) {
+            for entry in exif_data.entries.iter() {
+                let tag_name = format!("{}", entry.tag).to_lowercase();
+                if tag_name.contains("orientation") {
+                    let sval = format!("{}", entry.value);
+                    if let Some(tok) = sval.split_whitespace().next() {
+                        if let Ok(code) = tok.parse::<u32>() {
+                            if debug {
+                                println!("{} applying EXIF rotation (orientation={})", blue("[preview]"), pink(code));
+                            }
+                            img = match code {
+                                3 => DynamicImage::ImageRgba8(image::imageops::rotate180(&img)),
+                                6 => DynamicImage::ImageRgba8(image::imageops::rotate90(&img)),
+                                8 => DynamicImage::ImageRgba8(image::imageops::rotate270(&img)),
+                                _ => img,
+                            };
+                        }
+                    }
+                    break;
+                }
+            }
         }
 
         Ok(img)
@@ -1258,12 +1361,19 @@ fn save_image(
 
 fn write_jpeg_fast(img: &DynamicImage, out_path: &Path, quality: u8, debug: bool) -> Result<()> {
     if debug {
-        println!("{} writing quick JPEG {}", blue("[preview]"), out_path.display());
+        println!(
+            "{} writing quick JPEG {}",
+            blue("[preview]"),
+            out_path.display()
+        );
     }
-    let mut f = File::create(out_path).with_context(|| format!("Failed to create {:?}", out_path))?;
+    let mut f =
+        File::create(out_path).with_context(|| format!("Failed to create {:?}", out_path))?;
     let mut buf = Vec::new();
     let mut encoder = JpegEncoder::new_with_quality(&mut buf, quality);
-    encoder.encode_image(img).context("Failed to encode JPEG for preview")?;
+    encoder
+        .encode_image(img)
+        .context("Failed to encode JPEG for preview")?;
     f.write_all(&buf)?;
     Ok(())
 }
@@ -1306,7 +1416,7 @@ fn main() -> Result<()> {
                 if let Some(pos) = line.find("    ") {
                     let (left, right) = line.split_at(pos);
                     let right = &right[4..];
-                    out.push_str(&format!("{}    {}\n", pink(left), dark(right)));
+                    out.push_str(&format!("{}    {}\n", pink(left), right));
                 } else {
                     if trimmed.is_empty() {
                         out.push_str("\n");
@@ -1367,10 +1477,7 @@ fn main() -> Result<()> {
         if out_formats == ["png"] {
             out_formats = vec!["jpeg".to_string()];
         } else if out_formats.iter().any(|f| f != "jpeg") {
-            eprintln!(
-                "{}",
-                red("Preview mode only supports JPEG output.")
-            );
+            eprintln!("{}", red("Preview mode only supports JPEG output."));
             anyhow::bail!("Preview mode only supports JPEG output.");
         }
     }
@@ -1569,13 +1676,23 @@ fn main() -> Result<()> {
                 in_path.display()
             ))));
         }
-        
-        let res = unsafe { load_image(&in_path, args.preview, args.preview_index, args.debug, auto_bright) };
+
+        let res = unsafe {
+            load_image(
+                &in_path,
+                args.preview,
+                args.preview_index,
+                args.debug,
+                auto_bright,
+            )
+        };
         match res {
             Ok(img) => {
                 let mut img = resize_image(img, args.ratio);
                 img = apply_brightness(img, brightness_mode);
-                if !args.preview && let Some(rot) = args.rotation.as_ref() {
+                if !args.preview
+                    && let Some(rot) = args.rotation.as_ref()
+                {
                     if rot == "auto" {
                         if let Ok(buf) = std::fs::read(&in_path) {
                             if let Ok(exif) = rexif::parse_buffer(&buf) {
@@ -1838,11 +1955,18 @@ fn main() -> Result<()> {
                             if preview {
                                 if let Err(e) = write_jpeg_fast(&img, out_path, quality, debug) {
                                     let fname = in_path.file_name().unwrap().to_string_lossy();
-                                    tx.send(format!("{}... {}: {}", fname, red("Error saving preview"), e))
-                                        .ok();
+                                    tx.send(format!(
+                                        "{}... {}: {}",
+                                        fname,
+                                        red("Error saving preview"),
+                                        e
+                                    ))
+                                    .ok();
                                     return;
                                 }
-                            } else if let Err(e) = save_image(&img, out_path, fmt, quality, args.debug) {
+                            } else if let Err(e) =
+                                save_image(&img, out_path, fmt, quality, args.debug)
+                            {
                                 let fname = in_path.file_name().unwrap().to_string_lossy();
                                 tx.send(format!("{}... {}: {}", fname, red("Error saving"), e))
                                     .ok();
@@ -1869,12 +1993,19 @@ fn main() -> Result<()> {
                                 );
                                 let out_path = parent.join(out_name);
                                 if preview {
-                                    if let Err(e) = write_jpeg_fast(&img, &out_path, quality, debug) {
-                                        tx.send(format!("{}... {}: {}", fname, red("Error saving preview"), e))
-                                            .ok();
+                                    if let Err(e) = write_jpeg_fast(&img, &out_path, quality, debug)
+                                    {
+                                        tx.send(format!(
+                                            "{}... {}: {}",
+                                            fname,
+                                            red("Error saving preview"),
+                                            e
+                                        ))
+                                        .ok();
                                         return;
                                     }
-                                } else if let Err(e) = save_image(&img, &out_path, fmt, quality, args.debug)
+                                } else if let Err(e) =
+                                    save_image(&img, &out_path, fmt, quality, args.debug)
                                 {
                                     tx.send(format!("{}... {}: {}", fname, red("Error saving"), e))
                                         .ok();
@@ -1895,12 +2026,19 @@ fn main() -> Result<()> {
                                 );
                                 let out_path = out_dir.join(out_name);
                                 if preview {
-                                    if let Err(e) = write_jpeg_fast(&img, &out_path, quality, debug) {
-                                        tx.send(format!("{}... {}: {}", fname, red("Error saving preview"), e))
-                                            .ok();
+                                    if let Err(e) = write_jpeg_fast(&img, &out_path, quality, debug)
+                                    {
+                                        tx.send(format!(
+                                            "{}... {}: {}",
+                                            fname,
+                                            red("Error saving preview"),
+                                            e
+                                        ))
+                                        .ok();
                                         return;
                                     }
-                                } else if let Err(e) = save_image(&img, &out_path, fmt, quality, args.debug)
+                                } else if let Err(e) =
+                                    save_image(&img, &out_path, fmt, quality, args.debug)
                                 {
                                     tx.send(format!("{}... {}: {}", fname, red("Error saving"), e))
                                         .ok();

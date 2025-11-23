@@ -169,3 +169,79 @@ pub fn parse_exiftool_json(json: &JsonValue) -> Result<HashMap<String, String>> 
 
     Ok(exif_data)
 }
+
+#[cfg(target_os = "windows")]
+pub fn extract_preview_image(path: &Path) -> Result<Vec<u8>> {
+    let pid = std::process::id();
+    let temp_root = env::temp_dir().join(format!("exiftool_runtime_{}", pid));
+    let exiftool_root = temp_root.join("exiftool_files");
+
+    fs::create_dir_all(&exiftool_root)?;
+
+    let exe_path = temp_root.join("exiftool.exe");
+    fs::write(&exe_path, EXIFTOOL_EXECUTABLE)?;
+
+    fn write_dir(base: &Path, dir: &Dir) -> Result<()> {
+        for entry in dir.entries() {
+            match entry {
+                include_dir::DirEntry::Dir(subdir) => {
+                    let subdir_path = base.join(subdir.path());
+                    fs::create_dir_all(&subdir_path)?;
+                    write_dir(base, subdir)?;
+                }
+                include_dir::DirEntry::File(file) => {
+                    let dest_path = base.join(file.path());
+                    if let Some(parent) = dest_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    let mut f = fs::File::create(&dest_path)?;
+                    f.write_all(file.contents())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    write_dir(&exiftool_root, &EXIFTOOL_DIR)?;
+
+    let canonicalized_path = path.canonicalize().unwrap_or(path.to_path_buf());
+    let output = Command::new(&exe_path)
+        .current_dir(&temp_root)
+        .args(["-b", "-PreviewImage"])
+        .arg(&canonicalized_path)
+        .output()
+        .map_err(|e| anyhow!("failed to execute exiftool: {}", e))?;
+
+    let _ = fs::remove_dir_all(&temp_root);
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "exiftool failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    if output.stdout.is_empty() {
+        return Err(anyhow!("exiftool returned no preview data"));
+    }
+
+    Ok(output.stdout)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn extract_preview_image(path: &Path) -> Result<Vec<u8>> {
+    let canonicalized_path = path.canonicalize().unwrap_or(path.to_path_buf());
+    match Command::new("exiftool")
+        .args(["-b", "-PreviewImage"])
+        .arg(&canonicalized_path)
+        .output()
+    {
+        Ok(output) if output.status.success() && !output.stdout.is_empty() => Ok(output.stdout),
+        Ok(output) if output.status.success() => Err(anyhow!("exiftool returned no preview data")),
+        Ok(output) => Err(linux_macos_install_hint(&format!(
+            "exiftool failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))),
+        Err(e) => Err(linux_macos_install_hint(&e)),
+    }
+}
